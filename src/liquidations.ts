@@ -283,26 +283,23 @@ export async function checkUsersForLiquidationsAndBadDebt(
     try {
       // Check if the user already has a liquidation auction
       if (user === APP_CONFIG.backstopAddress) {
-        const { estimate: backstopPostionsEstimate, user: backstop } =
-          await sorobanHelper.loadUserPositionEstimate(poolId, user);
+        const { estimate: backstopPostionsEstimate } = await sorobanHelper.loadUserPositionEstimate(
+          poolId,
+          user
+        );
         if (
           isBadDebt(backstopPostionsEstimate) &&
           (await sorobanHelper.loadAuction(poolId, user, AuctionType.BadDebt)) === undefined
         ) {
-          let backstopLiabilities = Array.from(backstop.positions.liabilities.keys()).map(
-            (index) => pool.metadata.reserveList[index]
-          );
-          if (backstopLiabilities.length >= pool.metadata.maxPositions) {
-            backstopLiabilities = backstopLiabilities.slice(0, pool.metadata.maxPositions - 1);
-          }
           submissions.push({
             type: WorkSubmissionType.AuctionCreation,
             poolId,
             user: APP_CONFIG.backstopAddress,
             auctionType: AuctionType.BadDebt,
             auctionPercent: 100,
-            bid: backstopLiabilities,
-            lot: [APP_CONFIG.backstopTokenAddress],
+            // the pool selects the debt batch and backstop tier, and rejects non-matching bid or lot assets
+            bid: [],
+            lot: [],
           });
         }
       } else if (

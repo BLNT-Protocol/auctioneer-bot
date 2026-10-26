@@ -407,6 +407,35 @@ describe('poolEventHandler', () => {
     expect(auctionEntry.updated).toEqual(ledger);
   });
 
+  it('ignores unsupported auction types', async () => {
+    let poolEvent: PoolEventEvent = {
+      timestamp: 777,
+      type: EventType.POOL_EVENT,
+      event: {
+        id: '1',
+        contractId: mockPool.id,
+        contractType: BlendContractType.Pool,
+        ledger: 12345,
+        ledgerClosedAt: '2021-10-01T00:00:00Z',
+        txHash: '0x123',
+        eventType: PoolEventType.NewAuction,
+        // v3 protocol fee auction
+        auctionData: {
+          bid: new Map<string, bigint>([['USD', BigInt(123)]]),
+          lot: new Map<string, bigint>([['USD', BigInt(456)]]),
+          block: 500,
+        },
+        auctionType: 3,
+        user: APP_CONFIG.backstopAddress,
+        percent: 100,
+      },
+    };
+
+    await poolEventHandler.handlePoolEvent(poolEvent);
+
+    expect(db.getAllAuctionEntries()).toEqual([]);
+  });
+
   it('tracks auction for new bad debt auction event', async () => {
     let ledger = 12345;
     let poolEvent: PoolEventEvent = {

@@ -1,6 +1,6 @@
 {
   "name": "auctioneer-bot",
-  "version": "3.1.4",
+  "version": "4.0.0",
   "main": "index.js",
   "type": "module",
   "scripts": {
@@ -11,7 +11,7 @@
   },
   "author": "gm@script3.io",
   "license": "MIT",
-  "description": "A bot that creates and bids on auctions for a Blend pool",
+  "description": "A bot that creates and bids on auctions for BLNT v3 pools",
   "engines": {
     "node": ">=20"
   },

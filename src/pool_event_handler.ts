@@ -92,6 +92,13 @@ export class PoolEventHandler {
       }
 
       case PoolEventType.NewAuction: {
+        // ignore auction types the bot does not support (e.g. protocol fee auctions)
+        if (AuctionType[poolEvent.event.auctionType] === undefined) {
+          logger.info(
+            `Ignoring unsupported auction type ${poolEvent.event.auctionType} in pool ${pool.id}`
+          );
+          return;
+        }
         // check if the auction should be bid on by an auctioneer
         if (!canFillerBid(pool.id, poolEvent.event.auctionData)) {
           const logMessage =

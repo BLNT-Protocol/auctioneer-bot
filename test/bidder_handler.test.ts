@@ -21,8 +21,6 @@ jest.mock('../src/utils/logger.js', () => ({
 jest.mock('../src/utils/config.js', () => {
   let config: AppConfig = {
     backstopAddress: 'backstopAddress',
-    backstopTokenAddress: 'backstopTokenAddress',
-    interestFillerAddress: 'filler',
     workerKeypair: Keypair.random(),
     fillerKeypair: Keypair.random(),
     pools: [

@@ -7,7 +7,7 @@ import {
   RequestType,
   ScaledAuction,
 } from '@blend-capital/blend-sdk';
-import { Keypair, nativeToScVal, xdr } from '@stellar/stellar-sdk';
+import { Address, Keypair, nativeToScVal, xdr } from '@stellar/stellar-sdk';
 import { AuctionFill, calculateAuctionFill } from '../src/auction';
 import {
   AuctionBid,
@@ -15,6 +15,7 @@ import {
   BidderSubmitter,
   FillerUnwind,
 } from '../src/bidder_submitter';
+import { prepareInterestBid } from '../src/bid_token';
 import { getFillerAvailableBalances, managePositions } from '../src/filler';
 import { AuctioneerDatabase, AuctionEntry, AuctionType, FilledAuctionEntry } from '../src/utils/db';
 import { logger } from '../src/utils/logger';
@@ -31,6 +32,7 @@ jest.mock('../src/utils/soroban_helper');
 jest.mock('../src/auction');
 jest.mock('../src/utils/notifier');
 jest.mock('../src/filler');
+jest.mock('../src/bid_token');
 jest.mock('../src/utils/soroban_helper');
 jest.mock('@stellar/stellar-sdk', () => {
   const actual = jest.requireActual('@stellar/stellar-sdk');
@@ -51,11 +53,8 @@ jest.mock('../src/utils/config.js', () => {
     APP_CONFIG: {
       rpcURL: 'http://localhost:8000/rpc',
       networkPassphrase: 'Public Global Stellar Network ; September 2015',
-      backstopTokenAddress: 'CAS3FL6TLZKDGGSISDBWGGPXT3NRR4DYTZD7YOD3HMYO6LTJUVGRVEAM',
       backstopAddress: 'CAS3FL6TLZKDGGSISDBWGGPXT3NRR4DYTZD7YOD3HMYO6LTJUVGRVEAM',
       usdcAddress: 'CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75',
-      blndAddress: 'CD25MNVTZDL4Y3XBCPCJXGXATV5WUHHOWMYFF4YBEGU5FCPGMYTVG5JY',
-      interestFillerAddress: 'CDMPO7TQH2CJIOARTKAUY2TNZNXMA3BJ2TP3JYUH7HNUMRAZMYUH4FOB',
       fillerKeypair: Keypair.fromPublicKey(
         'GDMDYVZ7CQC2HLP3VONMAXQPGIQDNDQHQWLJZ7YTDGXUM32DVKOQHYGT'
       ),
@@ -100,6 +99,9 @@ describe('BidderSubmitter', () => {
     typeof calculateAuctionFill
   >;
   const mockedManagePositions = managePositions as jest.MockedFunction<typeof managePositions>;
+  const mockedPrepareInterestBid = prepareInterestBid as jest.MockedFunction<
+    typeof prepareInterestBid
+  >;
   const mockedGetFilledAvailableBalances = getFillerAvailableBalances as jest.MockedFunction<
     typeof getFillerAvailableBalances
   >;
@@ -175,6 +177,8 @@ describe('BidderSubmitter', () => {
       submission.auctionEntry.auction_type
     );
     expect(mockedSorobanHelper.setFeeLevel).toHaveBeenCalledTimes(0);
+    // only interest auctions require acquiring a bid token
+    expect(mockedPrepareInterestBid).not.toHaveBeenCalled();
     expect(mockedSorobanHelper.submitTransaction).toHaveBeenCalled();
     expect(mockDb.setFilledAuctionEntry).toHaveBeenCalledWith(expectedFillEntry);
     expect(bidderSubmitter.addSubmission).toHaveBeenCalledWith(
@@ -446,48 +450,92 @@ describe('BidderSubmitter', () => {
     );
   });
 
-  it('should invoke claim for unwind events from interest auctions', async () => {
-    bidderSubmitter.addSubmission = jest.fn();
-    mockedSorobanHelper.submitTransaction.mockResolvedValue({
-      ledger: 12345,
-      txHash: 'mock-tx-hash',
-      returnValue: nativeToScVal(12345n),
-    } as Api.GetSuccessfulTransactionResponse);
+  describe('interest auctions', () => {
+    const tierToken = 'CDQMIKIHKA5UY3FQJ2UDTLNX3GOPD3GPNZWSPTOBVOHEUMQJQXOPC7Y3';
+    const backstop = 'CAHCUKBPTW5DR5RNXOHCTJD5U76A6EEZXYZAQFRQEEQRXQ3CRUZ6Z3MO';
+    let auction: Auction;
+    let submission: AuctionBid;
 
-    const submission: FillerUnwind = {
-      type: BidderSubmissionType.UNWIND,
-      poolId: mockPool.id,
-      filledAuction: {
-        type: AuctionType.Interest,
-        user: fillerPubkey,
-        data: {
-          bid: new Map<string, bigint>([
-            ['CAS3FL6TLZKDGGSISDBWGGPXT3NRR4DYTZD7YOD3HMYO6LTJUVGRVEAM', BigInt(100e7)],
-          ]),
-          lot: new Map<string, bigint>([
-            ['CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA', BigInt(2000)],
-            ['CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75', BigInt(0)],
-            [
-              'CDTKPWPLOURQA2SGTKTUQOWRCBZEORB4BWBOMJ3D3ZTQQSGE5F6JBQLV',
-              BigInt('500000000000000000000000000000'),
-            ],
-          ]),
-          block: 0,
-        },
-        scaleBlock: 0,
-        filled: true,
-        fillHash: 'hash',
-      },
-    };
-    let result = await bidderSubmitter.submit(submission);
+    beforeEach(() => {
+      bidderSubmitter.addSubmission = jest.fn();
+      auction = new Auction(backstop, AuctionType.Interest, {
+        bid: new Map<string, bigint>([[tierToken, BigInt(1000e7)]]),
+        lot: new Map<string, bigint>([
+          ['CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75', BigInt(70e7)],
+        ]),
+        block: 750,
+      });
+      mockedSorobanHelper.loadAuction.mockResolvedValue(auction);
+      mockedCalcAuctionFill.mockResolvedValue({
+        percent: 100,
+        block: 1000,
+        bidValue: 60,
+        lotValue: 70,
+        requests: [
+          { request_type: RequestType.FillInterestAuction, address: backstop, amount: 100n },
+        ],
+      });
+      submission = {
+        type: BidderSubmissionType.BID,
+        auctionEntry: {
+          pool_id: mockPool.id,
+          user_id: backstop,
+          auction_type: AuctionType.Interest,
+          filler: fillerPubkey,
+          start_block: 750,
+          fill_block: 1000,
+        } as AuctionEntry,
+      };
+    });
 
-    expect(result).toBe(true);
-    expect(mockedSorobanHelper.submitTransaction).toHaveBeenCalledWith(
-      'AAAAAAAAABgAAAAAAAAAAdj3fnA+hJQ4EZqBTGpty27AbCnU37Tih/nbRkQZZih+AAAABWNsYWltAAAAAAAAAgAAABIAAAAAAAAAANg8Vz8UBaOt+6uawF4PMiA2jgeFlpz/ExmvRm9Dqp0DAAAAEAAAAAEAAAADAAAAEgAAAAEltPzYWa7C+mNIQ4xImzw8EMmLbSG+T9PLMMtolT75dwAAABIAAAABre/OWa7lKWj3YGHUlMJSW3Vln6QpamX0me8p5WR35JYAAAASAAAAAean2et1IwBqRpqnSDrREHJHRDwNguYnY95nCEjE6XyQAAAAAA==',
-      Keypair.fromPublicKey(fillerPubkey)
-    );
-    expect(mockedSorobanHelper.submitTransaction).toHaveBeenCalledTimes(1);
-    expect(bidderSubmitter.addSubmission).toHaveBeenCalledTimes(0);
+    it('prepares the bid token then fills the interest auction directly with the pool', async () => {
+      mockedSorobanHelper.submitTransaction.mockResolvedValue({
+        ledger: 1001,
+        txHash: 'mock-tx-hash',
+        latestLedgerCloseTime: Date.now(),
+      } as any);
+
+      const result = await bidderSubmitter.submit(submission);
+
+      expect(result).toBe(true);
+      // latest ledger is 999, so the next ledger is 1000
+      expect(mockedPrepareInterestBid).toHaveBeenCalledWith(
+        mockPool.id,
+        auction,
+        100,
+        1000,
+        mockedSorobanHelper,
+        mockDb
+      );
+      expect(mockedSorobanHelper.submitTransaction).toHaveBeenCalledTimes(1);
+      const submitOp = xdr.Operation.fromXDR(
+        mockedSorobanHelper.submitTransaction.mock.calls[0][0],
+        'base64'
+      )
+        .body()
+        .invokeHostFunctionOp()
+        .hostFunction()
+        .invokeContract();
+      expect(submitOp.functionName().toString()).toEqual('submit');
+      expect(Address.fromScAddress(submitOp.contractAddress()).toString()).toEqual(mockPool.id);
+      // the bid is prepared before the fill is submitted
+      expect(mockedPrepareInterestBid.mock.invocationCallOrder[0]).toBeLessThan(
+        mockedSorobanHelper.submitTransaction.mock.invocationCallOrder[0]
+      );
+      expect(mockDb.setFilledAuctionEntry).toHaveBeenCalled();
+      // the lot is sent directly to the filler, so no unwind is required
+      expect(bidderSubmitter.addSubmission).not.toHaveBeenCalled();
+    });
+
+    it('does not fill if preparing the bid fails', async () => {
+      mockedPrepareInterestBid.mockRejectedValue(new Error('Insufficient USDC to bid'));
+
+      const result = await bidderSubmitter.submit(submission);
+
+      expect(result).toBe(false);
+      expect(mockedSorobanHelper.submitTransaction).not.toHaveBeenCalled();
+      expect(mockDb.setFilledAuctionEntry).not.toHaveBeenCalled();
+    });
   });
 
   it('should return true if auction is in the queue', () => {

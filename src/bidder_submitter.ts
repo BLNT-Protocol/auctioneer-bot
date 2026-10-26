@@ -1,6 +1,7 @@
-import { FixedMath, PoolContractV2, ScaledAuction } from '@blend-capital/blend-sdk';
-import { rpc, scValToNative } from '@stellar/stellar-sdk';
+import { PoolContractV2, ScaledAuction } from '@blend-capital/blend-sdk';
+import { rpc } from '@stellar/stellar-sdk';
 import { calculateAuctionFill } from './auction.js';
+import { prepareInterestBid } from './bid_token.js';
 import { getFillerAvailableBalances, managePositions } from './filler.js';
 import { APP_CONFIG } from './utils/config.js';
 import { AuctioneerDatabase, AuctionEntry, AuctionType } from './utils/db.js';
@@ -13,7 +14,6 @@ import {
 } from './utils/notifier.js';
 import { SorobanHelper } from './utils/soroban_helper.js';
 import { SubmissionQueue } from './utils/submission_queue.js';
-import { InterestFillerContract } from './utils/interest_filler.js';
 
 export type BidderSubmission = AuctionBid | FillerUnwind;
 
@@ -123,36 +123,26 @@ export class BidderSubmitter extends SubmissionQueue<BidderSubmission> {
           // this object gets recreated every time, so no need to reset the fee level
           sorobanHelper.setFeeLevel('high');
         }
-        let result;
-        // use the interest auction filler if it exists and the auction is an interest auction
-        if (
-          APP_CONFIG.interestFillerAddress !== undefined &&
-          APP_CONFIG.interestFillerAddress !== '' &&
-          auctionBid.auctionEntry.auction_type == AuctionType.Interest &&
-          fill.percent === 100
-        ) {
-          logger.info(`Using interest auction filler contract ${APP_CONFIG.interestFillerAddress}`);
-          const filler_contract = new InterestFillerContract(APP_CONFIG.interestFillerAddress);
-          result = await sorobanHelper.submitTransaction(
-            filler_contract.fill_interest(
-              auctionBid.auctionEntry.filler,
-              auctionBid.auctionEntry.pool_id,
-              fill.percent,
-              FixedMath.toFixed(fill.bidValue * 1.01)
-            ),
-            APP_CONFIG.fillerKeypair
-          );
-        } else {
-          result = await sorobanHelper.submitTransaction(
-            pool.submit({
-              from: auctionBid.auctionEntry.filler,
-              spender: auctionBid.auctionEntry.filler,
-              to: auctionBid.auctionEntry.filler,
-              requests: fill.requests,
-            }),
-            APP_CONFIG.fillerKeypair
+        if (auctionBid.auctionEntry.auction_type === AuctionType.Interest) {
+          // acquire the bid token and approve the backstop to spend it
+          await prepareInterestBid(
+            auctionBid.auctionEntry.pool_id,
+            auction,
+            fill.percent,
+            nextLedger,
+            sorobanHelper,
+            this.db
           );
         }
+        const result = await sorobanHelper.submitTransaction(
+          pool.submit({
+            from: auctionBid.auctionEntry.filler,
+            spender: auctionBid.auctionEntry.filler,
+            to: auctionBid.auctionEntry.filler,
+            requests: fill.requests,
+          }),
+          APP_CONFIG.fillerKeypair
+        );
         const [scaledAuction] = auction.scale(result.ledger, fill.percent);
         this.db.setFilledAuctionEntry({
           tx_hash: result.txHash,
@@ -168,14 +158,17 @@ export class BidderSubmitter extends SubmissionQueue<BidderSubmission> {
           fill_block: result.ledger,
           timestamp: result.latestLedgerCloseTime,
         });
-        this.addSubmission(
-          {
-            type: BidderSubmissionType.UNWIND,
-            poolId: auctionBid.auctionEntry.pool_id,
-            filledAuction: scaledAuction,
-          },
-          2
-        );
+        // interest auction lots are sent directly to the filler, so there are no positions to unwind
+        if (auctionBid.auctionEntry.auction_type !== AuctionType.Interest) {
+          this.addSubmission(
+            {
+              type: BidderSubmissionType.UNWIND,
+              poolId: auctionBid.auctionEntry.pool_id,
+              filledAuction: scaledAuction,
+            },
+            2
+          );
+        }
         let logMessage =
           `Successful bid on auction\n` +
           `Type: ${AuctionType[auctionBid.auctionEntry.auction_type]}\n` +
@@ -225,27 +218,6 @@ export class BidderSubmitter extends SubmissionQueue<BidderSubmission> {
     );
 
     switch (fillerUnwind.filledAuction.type) {
-      case AuctionType.Interest: {
-        // claim tokens from the interest auction filler contract
-        const lot_tokens = Array.from(fillerUnwind.filledAuction.data.lot.keys());
-        const interest_filler_contract = new InterestFillerContract(
-          APP_CONFIG.interestFillerAddress
-        );
-        const op = interest_filler_contract.claim(APP_CONFIG.fillerKeypair.publicKey(), lot_tokens);
-        const result = await sorobanHelper.submitTransaction(op, APP_CONFIG.fillerKeypair);
-        let returnVal = undefined;
-        if (result.returnValue !== undefined) {
-          returnVal = scValToNative(result.returnValue);
-        }
-        logger.info(
-          `Successful claim from interest filler contract for filler: ${APP_CONFIG.fillerKeypair.publicKey()}\n` +
-            `Pool: ${fillerUnwind.poolId}\n` +
-            `Ledger: ${result.ledger}\n` +
-            `Hash: ${result.txHash}\n` +
-            `Return Value: ${stringify(returnVal)}`
-        );
-        break;
-      }
       case AuctionType.Liquidation:
       case AuctionType.BadDebt: {
         const filler_pubkey = APP_CONFIG.fillerKeypair.publicKey();

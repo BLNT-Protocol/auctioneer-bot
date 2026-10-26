@@ -7,6 +7,7 @@ import {
   Request,
   RequestType,
 } from '@blend-capital/blend-sdk';
+import { valueTierTokenBid, valueTierTokenLot } from './bid_token.js';
 import { getFillerAvailableBalances, getFillerProfitPct } from './filler.js';
 import { APP_CONFIG, PoolConfig } from './utils/config.js';
 import { AuctioneerDatabase } from './utils/db.js';
@@ -379,19 +380,8 @@ export async function calculateAuctionValue(
         lotValue += FixedMath.toFloat(amount, reserve.config.decimals) * (dbPrice ?? oraclePrice);
       }
     } else if (auction.type === AuctionType.BadDebt) {
-      if (assetId !== APP_CONFIG.backstopTokenAddress) {
-        throw new Error(
-          `Unexpected bad debt auction. Lot contains asset other than the backstop token: ${assetId}`
-        );
-      }
-      const lpTokenValue = await sorobanHelper.simLPTokensToUSDC(amount);
-      if (lpTokenValue !== undefined) {
-        lotValue += FixedMath.toFloat(lpTokenValue, 7);
-      } else {
-        // assume 2% slippage on spot price
-        const backstopToken = await sorobanHelper.loadBackstopToken();
-        lotValue += FixedMath.toFloat(amount, 7) * (backstopToken.lpTokenPrice * 0.98);
-      }
+      // bad debt auction lots are the selected backstop tier's token
+      lotValue += await valueTierTokenLot(assetId, amount, poolOracle, db, sorobanHelper);
     } else {
       throw new Error(`Failed to value lot asset: ${assetId}`);
     }
@@ -411,19 +401,8 @@ export async function calculateAuctionValue(
       effectiveLiabilities += reserve.toEffectiveAssetFromDTokenFloat(amount) * oraclePrice;
       bidValue += reserve.toAssetFromDTokenFloat(amount) * (dbPrice ?? oraclePrice);
     } else if (auction.type === AuctionType.Interest) {
-      if (assetId !== APP_CONFIG.backstopTokenAddress) {
-        throw new Error(
-          `Unexpected interest auction. Bid contains asset other than the backstop token: ${assetId}`
-        );
-      }
-      const lpTokenValue = await sorobanHelper.simLPTokensGetUSDCIn(amount);
-      if (lpTokenValue !== undefined) {
-        bidValue += FixedMath.toFloat(lpTokenValue, 7);
-      } else {
-        // assume 2% slippage on deposit
-        const backstopToken = await sorobanHelper.loadBackstopToken();
-        bidValue += FixedMath.toFloat(amount, 7) * (backstopToken.lpTokenPrice * 1.02);
-      }
+      // interest auction bids are the selected backstop tier's token, valued as the USDC needed to acquire it
+      bidValue += await valueTierTokenBid(assetId, amount, poolOracle, db, sorobanHelper);
     } else {
       throw new Error(`Failed to value bid asset: ${assetId}`);
     }

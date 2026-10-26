@@ -8,167 +8,107 @@ import {
 } from '../../src/utils/config';
 
 describe('validateAppConfig', () => {
+  function buildConfig(): any {
+    return {
+      name: 'App',
+      rpcURL: 'http://localhost',
+      networkPassphrase: 'Test',
+      backstopAddress: 'backstop',
+      usdcAddress: 'usdc',
+      usdcAsset: 'USDC:issuer',
+      workerKeypair: Keypair.random().secret(),
+      fillerKeypair: Keypair.random().secret(),
+      pools: [
+        {
+          poolAddress: 'pool',
+          defaultProfitPct: 1,
+          minHealthFactor: 1,
+          primaryAsset: 'asset',
+          minPrimaryCollateral: '100',
+          forceFill: true,
+          supportedBid: ['bid'],
+          supportedLot: ['lot'],
+        },
+      ],
+      priceSources: [{ assetId: 'asset', type: 'binance', symbol: 'symbol' }],
+      slackWebhook: 'http://webhook',
+      horizonURL: 'http://horizon',
+    };
+  }
+
   it('should return false for non-object config', () => {
     expect(validateAppConfig(null)).toBe(false);
     expect(validateAppConfig('string')).toBe(false);
   });
 
   it('should return false for config with missing or incorrect properties', () => {
-    const invalidConfig = {
-      name: 'App',
-      rpcURL: 'http://localhost',
-      networkPassphrase: 'Test',
-      backstopAddress: 'backstop',
-      backstopTokenAddress: 'token',
-      usdcAddress: 'usdc',
-      blndAddress: 'blnd',
-      keypair: 'secret',
-      pools: [],
-      fillers: [],
-      priceSources: [],
-      slackWebhook: 123, // Invalid type
-    };
+    const invalidConfig = buildConfig();
+    invalidConfig.slackWebhook = 123;
     expect(validateAppConfig(invalidConfig)).toBe(false);
+
+    const missingUsdcAsset = buildConfig();
+    delete missingUsdcAsset.usdcAsset;
+    expect(validateAppConfig(missingUsdcAsset)).toBe(false);
+  });
+
+  it('should require usdcAsset formatted as code:issuer', () => {
+    const config = buildConfig();
+    config.usdcAsset = 'USDC';
+    expect(validateAppConfig(config)).toBe(false);
   });
 
   it('should return false for non-number base fee', () => {
-    let invalidConfig = {
-      name: 'App',
-      rpcURL: 'http://localhost',
-      networkPassphrase: 'Test',
-      backstopAddress: 'backstop',
-      backstopTokenAddress: 'token',
-      usdcAddress: 'usdc',
-      blndAddress: 'blnd',
-      interestFillerAddress: 'filler',
-      workerKeypair: Keypair.random().secret(),
-      fillerKeypair: Keypair.random().secret(),
-      pools: [
-        {
-          poolAddress: 'pool',
-          defaultProfitPct: 1,
-          minHealthFactor: 1,
-          primaryAsset: 'asset',
-          minPrimaryCollateral: '100',
-          forceFill: true,
-          supportedBid: ['bid'],
-          supportedLot: ['lot'],
-        },
-      ],
-      priceSources: [{ assetId: 'asset', type: 'binance', symbol: 'symbol' }],
-      slackWebhook: 'http://webhook',
-      horizonURL: 'http://horizon',
-      highBaseFee: 10000,
-      baseFee: '5000',
-    };
-    expect(validateAppConfig(invalidConfig)).toBe(false);
-    // @ts-ignore
-    invalidConfig.baseFee = 5000; // Fixing the base fee type
-    // @ts-ignore
-    invalidConfig.highBaseFee = '10000'; // Fixing the high base fee type
-    expect(validateAppConfig(invalidConfig)).toBe(false);
+    const config = buildConfig();
+    config.highBaseFee = 10000;
+    config.baseFee = '5000';
+    expect(validateAppConfig(config)).toBe(false);
+
+    const config2 = buildConfig();
+    config2.baseFee = 5000;
+    config2.highBaseFee = '10000';
+    expect(validateAppConfig(config2)).toBe(false);
   });
 
-  it('should return true for valid config', () => {
-    const validConfig = {
-      name: 'App',
-      rpcURL: 'http://localhost',
-      networkPassphrase: 'Test',
-      backstopAddress: 'backstop',
-      backstopTokenAddress: 'token',
-      usdcAddress: 'usdc',
-      blndAddress: 'blnd',
-      interestFillerAddress: 'filler',
-      workerKeypair: Keypair.random().secret(),
-      fillerKeypair: Keypair.random().secret(),
-      pools: [
-        {
-          poolAddress: 'pool',
-          defaultProfitPct: 1,
-          minHealthFactor: 1,
-          primaryAsset: 'asset',
-          minPrimaryCollateral: '100',
-          forceFill: true,
-          supportedBid: ['bid'],
-          supportedLot: ['lot'],
-        },
-      ],
-      priceSources: [{ assetId: 'asset', type: 'binance', symbol: 'symbol' }],
-      slackWebhook: 'http://webhook',
-      horizonURL: 'http://horizon',
-    };
-    expect(validateAppConfig(validConfig)).toBe(true);
+  it('should return true for valid config and apply defaults', () => {
+    const config = buildConfig();
+    expect(validateAppConfig(config)).toBe(true);
+    expect(config.slippage).toEqual(0.01);
+    expect(config.minInterestValue).toEqual(20);
   });
 
-  it('should return true for valid config with base fees', () => {
-    const validConfig = {
-      name: 'App',
-      rpcURL: 'http://localhost',
-      networkPassphrase: 'Test',
-      backstopAddress: 'backstop',
-      backstopTokenAddress: 'token',
-      usdcAddress: 'usdc',
-      blndAddress: 'blnd',
-      interestFillerAddress: 'filler',
-      workerKeypair: Keypair.random().secret(),
-      fillerKeypair: Keypair.random().secret(),
-      pools: [
-        {
-          poolAddress: 'pool',
-          defaultProfitPct: 1,
-          minHealthFactor: 1,
-          primaryAsset: 'asset',
-          minPrimaryCollateral: '100',
-          forceFill: true,
-          supportedBid: ['bid'],
-          supportedLot: ['lot'],
-        },
-      ],
-      priceSources: [{ assetId: 'asset', type: 'binance', symbol: 'symbol' }],
-      slackWebhook: 'http://webhook',
-      horizonURL: 'http://horizon',
-      highBaseFee: 10000,
-      baseFee: 5000,
-    };
-    expect(validateAppConfig(validConfig)).toBe(true);
+  it('should return true for valid config with optional fields', () => {
+    const config = buildConfig();
+    config.highBaseFee = 10000;
+    config.baseFee = 5000;
+    config.slippage = 0.02;
+    config.minInterestValue = 50;
+    expect(validateAppConfig(config)).toBe(true);
+    expect(config.slippage).toEqual(0.02);
+    expect(config.minInterestValue).toEqual(50);
+  });
+
+  it('should return false for non-number slippage or min interest value', () => {
+    const config = buildConfig();
+    config.slippage = '0.01';
+    expect(validateAppConfig(config)).toBe(false);
+
+    const config2 = buildConfig();
+    config2.minInterestValue = '20';
+    expect(validateAppConfig(config2)).toBe(false);
   });
 
   it('should validate notification level', () => {
-    let config = {
-      name: 'App',
-      rpcURL: 'http://localhost',
-      networkPassphrase: 'Test',
-      backstopAddress: 'backstop',
-      backstopTokenAddress: 'token',
-      usdcAddress: 'usdc',
-      blndAddress: 'blnd',
-      interestFillerAddress: 'filler',
-      workerKeypair: Keypair.random().secret(),
-      fillerKeypair: Keypair.random().secret(),
-      pools: [
-        {
-          poolAddress: 'pool',
-          defaultProfitPct: 1,
-          minHealthFactor: 1,
-          primaryAsset: 'asset',
-          minPrimaryCollateral: '100',
-          forceFill: true,
-          supportedBid: ['bid'],
-          supportedLot: ['lot'],
-        },
-      ],
-      priceSources: [{ assetId: 'asset', type: 'binance', symbol: 'symbol' }],
-      slackWebhook: 'http://webhook',
-      horizonURL: 'http://horizon',
-      notificationLevel: 'medium',
-    };
+    const config = buildConfig();
+    config.notificationLevel = 'medium';
     expect(validateAppConfig(config)).toBe(false);
 
-    config.notificationLevel = 1 as any;
-    expect(validateAppConfig(config)).toBe(false);
+    const config2 = buildConfig();
+    config2.notificationLevel = 1;
+    expect(validateAppConfig(config2)).toBe(false);
 
-    config.notificationLevel = 'low';
-    expect(validateAppConfig(config)).toBe(true);
+    const config3 = buildConfig();
+    config3.notificationLevel = 'low';
+    expect(validateAppConfig(config3)).toBe(true);
   });
 });
 
