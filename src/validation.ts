@@ -1,4 +1,7 @@
+import { Asset } from '@stellar/stellar-sdk';
+import { getTierTokenRoute } from './bid_token.js';
 import { APP_CONFIG } from './utils/config.js';
+import { logger } from './utils/logger.js';
 import { SorobanHelper } from './utils/soroban_helper.js';
 
 /**
@@ -15,24 +18,31 @@ export async function validateBot(sorobanHelper: SorobanHelper): Promise<void> {
     throw new Error('Worker and filler keypairs must be different');
   }
 
-  // validate the interest filler is a valid address and the auctioneer is the owner
-  const owner = await sorobanHelper.simInterestFillerOwner();
-  if (owner !== APP_CONFIG.fillerKeypair.publicKey()) {
+  // validate the classic USDC asset matches the USDC contract, as it is used to buy XLM on the DEX
+  const [code, issuer] = APP_CONFIG.usdcAsset.split(':');
+  const usdcContract = new Asset(code, issuer).contractId(APP_CONFIG.networkPassphrase);
+  if (usdcContract !== APP_CONFIG.usdcAddress) {
     throw new Error(
-      `Interest filler contract owner mismatch. Expected: ${APP_CONFIG.fillerKeypair.publicKey()}, Got: ${owner}`
+      `USDC asset mismatch. ${APP_CONFIG.usdcAsset} has contract ${usdcContract}, expected: ${APP_CONFIG.usdcAddress}`
     );
   }
 
-  // validate the backstop token loads correctly
-  await sorobanHelper.loadBackstopToken();
-
-  // validate each pool loads and that each pool has the same backstop
   for (const poolConfig of APP_CONFIG.pools) {
+    // validate each pool loads and that each pool has the same backstop
     const pool = await sorobanHelper.loadPool(poolConfig.poolAddress);
     if (pool.metadata.backstop !== APP_CONFIG.backstopAddress) {
       throw new Error(
-        `Pool backstop mismatch for pool ${pool.id}. Expected: ${APP_CONFIG.backstopTokenAddress}, Got: ${pool.metadata.backstop}`
+        `Pool backstop mismatch for pool ${pool.id}. Expected: ${APP_CONFIG.backstopAddress}, Got: ${pool.metadata.backstop}`
       );
+    }
+
+    // validate the filler can acquire each tier token it is configured to bid with
+    const tierTokens = await sorobanHelper.loadBackstopTierTokens(pool.id);
+    logger.info(`Pool ${pool.id} backstop tier tokens: ${tierTokens}`);
+    for (const token of tierTokens) {
+      if (poolConfig.supportedBid.includes('*') || poolConfig.supportedBid.includes(token)) {
+        await getTierTokenRoute(token, sorobanHelper);
+      }
     }
   }
 }

@@ -1,14 +1,14 @@
 import {
   Auction,
   AuctionType,
-  BackstopToken,
   FixedMath,
   PoolUser,
   PositionsEstimate,
   Request,
 } from '@blend-capital/blend-sdk';
 import { Keypair, xdr } from '@stellar/stellar-sdk';
-import { calculateAuctionFill } from '../src/auction.js';
+import { calculateAuctionFill, calculateAuctionValue } from '../src/auction.js';
+import { valueTierTokenBid, valueTierTokenLot } from '../src/bid_token.js';
 import { getFillerAvailableBalances, getFillerProfitPct } from '../src/filler.js';
 import { PoolConfig } from '../src/utils/config.js';
 import { AuctioneerDatabase } from '../src/utils/db.js';
@@ -16,13 +16,13 @@ import { SorobanHelper } from '../src/utils/soroban_helper.js';
 import {
   AQUA,
   BACKSTOP,
-  BACKSTOP_TOKEN,
   EURC,
   inMemoryAuctioneerDb,
   MOCK_LEDGER,
   MOCK_TIMESTAMP,
   mockPool,
   mockPoolOracle,
+  TIER_TOKEN,
   USDC,
   XLM,
 } from './helpers/mocks.js';
@@ -30,17 +30,18 @@ import { expectRelApproxEqual } from './helpers/utils.js';
 
 jest.mock('../src/utils/soroban_helper.js');
 jest.mock('../src/filler.js');
+jest.mock('../src/bid_token.js');
 jest.mock('../src/utils/config.js', () => {
   return {
     APP_CONFIG: {
       rpcURL: 'http://localhost:8000/rpc',
       networkPassphrase: 'Public Global Stellar Network ; September 2015',
       poolAddress: 'CBP7NO6F7FRDHSOFQBT2L2UWYIZ2PU76JKVRYAQTG3KZSQLYAOKIF2WB',
-      backstopAddress: 'CAO3AGAMZVRMHITL36EJ2VZQWKYRPWMQAPDQD5YEOF3GIF7T44U4JAL3',
-      backstopTokenAddress: 'CAS3FL6TLZKDGGSISDBWGGPXT3NRR4DYTZD7YOD3HMYO6LTJUVGRVEAM',
+      backstopAddress: 'CAHCUKBPTW5DR5RNXOHCTJD5U76A6EEZXYZAQFRQEEQRXQ3CRUZ6Z3MO',
       usdcAddress: 'CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75',
-      blndAddress: 'CD25MNVTZDL4Y3XBCPCJXGXATV5WUHHOWMYFF4YBEGU5FCPGMYTVG5JY',
-      interestFillerAddress: 'CDMPO7TQH2CJIOARTKAUY2TNZNXMA3BJ2TP3JYUH7HNUMRAZMYUH4FOB',
+      usdcAsset: 'USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN',
+      slippage: 0.01,
+      minInterestValue: 20,
       fillerKeypair: Keypair.random(),
     },
   };
@@ -57,6 +58,12 @@ describe('auctions', () => {
   >;
   const mockedGetFillerProfitPct = getFillerProfitPct as jest.MockedFunction<
     typeof getFillerProfitPct
+  >;
+  const mockedValueTierTokenBid = valueTierTokenBid as jest.MockedFunction<
+    typeof valueTierTokenBid
+  >;
+  const mockedValueTierTokenLot = valueTierTokenLot as jest.MockedFunction<
+    typeof valueTierTokenLot
   >;
 
   beforeEach(() => {
@@ -91,13 +98,13 @@ describe('auctions', () => {
       estimate: positionEstimate,
       user: {} as PoolUser,
     });
-    mockedSorobanHelper.simLPTokensToUSDC.mockImplementation((number: bigint) => {
-      // 0.50 USDC out per LP token in
-      return Promise.resolve((number * 5000000n) / 10000000n);
+    mockedValueTierTokenLot.mockImplementation(async (_token: string, amount: bigint) => {
+      // 0.50 USDC out per tier token sold
+      return FixedMath.toFloat(amount, 7) * 0.5;
     });
-    mockedSorobanHelper.simLPTokensGetUSDCIn.mockImplementation((number: bigint) => {
-      // 0.55 USDC in per LP token out
-      return Promise.resolve((number * 5500000n) / 10000000n);
+    mockedValueTierTokenBid.mockImplementation(async (_token: string, amount: bigint) => {
+      // 0.55 USDC in per tier token acquired
+      return FixedMath.toFloat(amount, 7) * 0.55;
     });
   });
 
@@ -112,7 +119,7 @@ describe('auctions', () => {
           [EURC, FixedMath.toFixed(34)],
           [AQUA, FixedMath.toFixed(2500)],
         ]),
-        bid: new Map<string, bigint>([[BACKSTOP_TOKEN, FixedMath.toFixed(728.01456)]]),
+        bid: new Map<string, bigint>([[TIER_TOKEN, FixedMath.toFixed(728.01456)]]),
         block: MOCK_LEDGER,
       });
 
@@ -154,7 +161,7 @@ describe('auctions', () => {
           [EURC, FixedMath.toFixed(34)],
           [AQUA, FixedMath.toFixed(2500)],
         ]),
-        bid: new Map<string, bigint>([[BACKSTOP_TOKEN, FixedMath.toFixed(728.01456)]]),
+        bid: new Map<string, bigint>([[TIER_TOKEN, FixedMath.toFixed(728.01456)]]),
         block: MOCK_LEDGER,
       });
 
@@ -194,7 +201,7 @@ describe('auctions', () => {
           [EURC, FixedMath.toFixed(34)],
           [AQUA, FixedMath.toFixed(2500)],
         ]),
-        bid: new Map<string, bigint>([[BACKSTOP_TOKEN, FixedMath.toFixed(728.01456)]]),
+        bid: new Map<string, bigint>([[TIER_TOKEN, FixedMath.toFixed(728.01456)]]),
         block: MOCK_LEDGER,
       });
 
@@ -237,7 +244,7 @@ describe('auctions', () => {
           [EURC, FixedMath.toFixed(34)],
           [AQUA, FixedMath.toFixed(2500)],
         ]),
-        bid: new Map<string, bigint>([[BACKSTOP_TOKEN, FixedMath.toFixed(728.01456)]]),
+        bid: new Map<string, bigint>([[TIER_TOKEN, FixedMath.toFixed(728.01456)]]),
         block: MOCK_LEDGER,
       });
 
@@ -277,7 +284,7 @@ describe('auctions', () => {
           [EURC, FixedMath.toFixed(34)],
           [AQUA, FixedMath.toFixed(2500)],
         ]),
-        bid: new Map<string, bigint>([[BACKSTOP_TOKEN, FixedMath.toFixed(728.01456)]]),
+        bid: new Map<string, bigint>([[TIER_TOKEN, FixedMath.toFixed(728.01456)]]),
         block: MOCK_LEDGER,
       });
 
@@ -325,7 +332,7 @@ describe('auctions', () => {
           [EURC, FixedMath.toFixed(34)],
           [AQUA, FixedMath.toFixed(2500)],
         ]),
-        bid: new Map<string, bigint>([[BACKSTOP_TOKEN, FixedMath.toFixed(2500)]]),
+        bid: new Map<string, bigint>([[TIER_TOKEN, FixedMath.toFixed(2500)]]),
         block: MOCK_LEDGER,
       });
 
@@ -906,7 +913,7 @@ describe('auctions', () => {
       let user = Keypair.random().publicKey();
       let nextLedger = MOCK_LEDGER + 1;
       let auction = new Auction(user, AuctionType.BadDebt, {
-        lot: new Map<string, bigint>([[BACKSTOP_TOKEN, FixedMath.toFixed(4200)]]),
+        lot: new Map<string, bigint>([[TIER_TOKEN, FixedMath.toFixed(4200)]]),
         bid: new Map<string, bigint>([
           [XLM, FixedMath.toFixed(10000)],
           [USDC, FixedMath.toFixed(500)],
@@ -969,7 +976,7 @@ describe('auctions', () => {
       let user = Keypair.random().publicKey();
       let nextLedger = MOCK_LEDGER + 1;
       let auction = new Auction(user, AuctionType.BadDebt, {
-        lot: new Map<string, bigint>([[BACKSTOP_TOKEN, FixedMath.toFixed(4200)]]),
+        lot: new Map<string, bigint>([[TIER_TOKEN, FixedMath.toFixed(4200)]]),
         bid: new Map<string, bigint>([
           [XLM, FixedMath.toFixed(10000)],
           [USDC, FixedMath.toFixed(500)],
@@ -1027,6 +1034,62 @@ describe('auctions', () => {
         [XLM, USDC],
         mockedSorobanHelper
       );
+    });
+  });
+
+  describe('calculateAuctionValue', () => {
+    it('values an interest auction bid as the cost to acquire the tier token', async () => {
+      mockedValueTierTokenBid.mockResolvedValue(64.5);
+      const auction = new Auction(BACKSTOP, AuctionType.Interest, {
+        bid: new Map([[TIER_TOKEN, BigInt(1000e7)]]),
+        lot: new Map([[USDC, BigInt(70e7)]]),
+        block: 100,
+      });
+
+      const value = await calculateAuctionValue(
+        auction,
+        mockPool,
+        mockPoolOracle,
+        mockedSorobanHelper,
+        db
+      );
+
+      expect(mockedValueTierTokenBid).toHaveBeenCalledWith(
+        TIER_TOKEN,
+        BigInt(1000e7),
+        mockPoolOracle,
+        db,
+        mockedSorobanHelper
+      );
+      expect(value.bidValue).toEqual(64.5);
+      // lot is valued at the oracle price
+      expect(value.lotValue).toBeCloseTo(70 * mockPoolOracle.getPriceFloat(USDC)!, 5);
+    });
+
+    it('values a bad debt auction lot as the sale value of the tier token', async () => {
+      mockedValueTierTokenLot.mockResolvedValue(50);
+      const auction = new Auction(BACKSTOP, AuctionType.BadDebt, {
+        bid: new Map([[XLM, BigInt(100e7)]]),
+        lot: new Map([[TIER_TOKEN, BigInt(1000e7)]]),
+        block: 100,
+      });
+
+      const value = await calculateAuctionValue(
+        auction,
+        mockPool,
+        mockPoolOracle,
+        mockedSorobanHelper,
+        db
+      );
+
+      expect(mockedValueTierTokenLot).toHaveBeenCalledWith(
+        TIER_TOKEN,
+        BigInt(1000e7),
+        mockPoolOracle,
+        db,
+        mockedSorobanHelper
+      );
+      expect(value.lotValue).toEqual(50);
     });
   });
 });

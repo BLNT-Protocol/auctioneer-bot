@@ -1,15 +1,14 @@
 import {
   Auction,
   AuctionData,
-  BackstopToken,
   ContractErrorType,
   Network,
   parseError,
   Pool,
   PoolContract,
+  PoolContractV2,
   PoolOracle,
   PoolUser,
-  PoolV2,
   PositionsEstimate,
 } from '@blend-capital/blend-sdk';
 import {
@@ -28,6 +27,7 @@ import {
 } from '@stellar/stellar-sdk';
 import { APP_CONFIG } from './config.js';
 import { logger } from './logger.js';
+import { loadPoolUserV3, loadPoolV3 } from './pool_v3.js';
 
 export interface PoolUserEst {
   estimate: PositionsEstimate;
@@ -38,6 +38,10 @@ export interface ErrorTimeout {
   timeout: number;
   error: any;
 }
+
+// immutable on-chain data, shared across SorobanHelper instances
+const tierTokenCache = new Map<string, string[]>();
+const cometTokenCache = new Map<string, string[]>();
 
 export class SorobanHelper {
   network: Network;
@@ -82,7 +86,7 @@ export class SorobanHelper {
       if (cachedPool) {
         return cachedPool;
       }
-      let pool: Pool = await PoolV2.load(this.network, poolId);
+      let pool: Pool = await loadPoolV3(this.network, poolId);
       this.pool_cache.set(poolId, pool);
       return pool;
     } catch (e: any) {
@@ -97,8 +101,7 @@ export class SorobanHelper {
       if (cachedUser) {
         return cachedUser;
       }
-      const pool = await this.loadPool(poolId);
-      const user = await pool.loadUser(userId);
+      const user = await loadPoolUserV3(this.network, poolId, userId);
 
       this.user_cache.set(poolId + userId, user);
       return user;
@@ -144,6 +147,11 @@ export class SorobanHelper {
     auctionType: number
   ): Promise<Auction | undefined> {
     try {
+      // backstop auctions (bad debt and interest) are stored under a private key, so they
+      // can only be read via `get_auction`
+      if (auctionType !== 0) {
+        return await this.simAuction(poolId, userId, auctionType);
+      }
       const stellarRpc = new rpc.Server(this.network.rpc, this.network.opts);
       const ledgerKey = AuctionData.ledgerKey(poolId, {
         auct_type: auctionType,
@@ -163,13 +171,178 @@ export class SorobanHelper {
     }
   }
 
-  async loadBackstopToken(): Promise<BackstopToken> {
-    return await BackstopToken.load(
-      this.network,
-      APP_CONFIG.backstopTokenAddress,
-      APP_CONFIG.blndAddress,
-      APP_CONFIG.usdcAddress
-    );
+  /**
+   * Load an auction via `get_auction`
+   * @returns The auction, or undefined if no auction exists
+   */
+  async simAuction(
+    poolId: string,
+    userId: string,
+    auctionType: number
+  ): Promise<Auction | undefined> {
+    const result = await this.simCall(poolId, 'get_auction', [
+      nativeToScVal(auctionType, { type: 'u32' }),
+      nativeToScVal(userId, { type: 'address' }),
+    ]);
+    if (rpc.Api.isSimulationSuccess(result) && result.result?.retval) {
+      const auctionData = PoolContract.parsers.getAuction(result.result.retval.toXDR('base64'));
+      return new Auction(userId, auctionType, auctionData);
+    } else if (rpc.Api.isSimulationError(result)) {
+      // the pool returns a bad request error if the auction does not exist
+      const error = parseError(result);
+      if (error.type === ContractErrorType.PoolBadRequest) {
+        return undefined;
+      }
+      throw error;
+    }
+    throw new Error(`Unknown simulation result for get_auction`);
+  }
+
+  /**
+   * Simulate creating an auction
+   * @returns The auction data that would be created, or undefined if the pool would reject the auction
+   */
+  async simNewAuction(
+    poolId: string,
+    auctionType: number,
+    user: string,
+    bid: string[],
+    lot: string[],
+    percent: number
+  ): Promise<AuctionData | undefined> {
+    const op = new PoolContractV2(poolId).newAuction({
+      user,
+      auction_type: auctionType,
+      percent,
+      bid,
+      lot,
+    });
+    const result = await this.simOperation(xdr.Operation.fromXDR(op, 'base64'));
+    if (rpc.Api.isSimulationSuccess(result) && result.result?.retval) {
+      return PoolContract.parsers.getAuction(result.result.retval.toXDR('base64'));
+    } else if (rpc.Api.isSimulationError(result)) {
+      // log the raw contract error, as the sdk does not know v3 error codes
+      const contractError = result.error.match(/Error\(Contract, #\d+\)/)?.[0];
+      logger.info(
+        `Simulated new auction failed for pool ${poolId}, type ${auctionType}: ${contractError ?? ContractErrorType[parseError(result).type]}`
+      );
+    }
+    return undefined;
+  }
+
+  /**
+   * Load the token for each backstop tier of a pool, in waterfall order. A pool's tiers are immutable,
+   * so results are cached.
+   */
+  async loadBackstopTierTokens(poolId: string): Promise<string[]> {
+    const cached = tierTokenCache.get(poolId);
+    if (cached !== undefined) {
+      return cached;
+    }
+    const result = await this.simCall(APP_CONFIG.backstopAddress, 'pool_data', [
+      nativeToScVal(poolId, { type: 'address' }),
+    ]);
+    if (rpc.Api.isSimulationSuccess(result) && result.result?.retval) {
+      const poolData = scValToNative(result.result.retval);
+      const tokens: string[] = poolData.tiers.map((tier: { token: string }) => tier.token);
+      tierTokenCache.set(poolId, tokens);
+      return tokens;
+    }
+    throw new Error(`Failed to load backstop tiers for pool: ${poolId}`);
+  }
+
+  /**
+   * Load the underlying tokens of a Comet LP. Results are cached.
+   */
+  async loadCometTokens(cometId: string): Promise<string[]> {
+    const cached = cometTokenCache.get(cometId);
+    if (cached !== undefined) {
+      return cached;
+    }
+    const result = await this.simCall(cometId, 'get_tokens', []);
+    if (rpc.Api.isSimulationSuccess(result) && result.result?.retval) {
+      const tokens: string[] = scValToNative(result.result.retval);
+      cometTokenCache.set(cometId, tokens);
+      return tokens;
+    }
+    throw new Error(`Failed to load comet tokens for: ${cometId}`);
+  }
+
+  /**
+   * Fetch the amount of "tokenIn" required to mint "lpTokens" from a Comet LP via a single sided deposit
+   * @returns The amount of "tokenIn" required, or undefined if the simulation failed
+   */
+  async simCometDepositTokenIn(
+    cometId: string,
+    tokenIn: string,
+    lpTokens: bigint
+  ): Promise<bigint | undefined> {
+    // the comet itself holds the underlying tokens, so it can be used as the depositor
+    return this.simCometCall(cometId, 'dep_lp_tokn_amt_out_get_tokn_in', [
+      nativeToScVal(tokenIn, { type: 'address' }),
+      nativeToScVal(lpTokens, { type: 'i128' }),
+      nativeToScVal(1_000_000_0000000, { type: 'i128' }),
+      nativeToScVal(cometId, { type: 'address' }),
+    ]);
+  }
+
+  /**
+   * Fetch the amount of "tokenOut" received by burning "lpTokens" of a Comet LP via a single sided withdrawal
+   * @param holder - An address that holds at least "lpTokens", used for the simulation
+   * @returns The amount of "tokenOut" received, or undefined if the simulation failed
+   */
+  async simCometWithdrawTokenOut(
+    cometId: string,
+    tokenOut: string,
+    lpTokens: bigint,
+    holder: string
+  ): Promise<bigint | undefined> {
+    return this.simCometCall(cometId, 'wdr_tokn_amt_in_get_lp_tokns_out', [
+      nativeToScVal(tokenOut, { type: 'address' }),
+      nativeToScVal(lpTokens, { type: 'i128' }),
+      nativeToScVal(0, { type: 'i128' }),
+      nativeToScVal(holder, { type: 'address' }),
+    ]);
+  }
+
+  private async simCometCall(
+    cometId: string,
+    method: string,
+    args: xdr.ScVal[]
+  ): Promise<bigint | undefined> {
+    try {
+      const result = await this.simCall(cometId, method, args);
+      if (rpc.Api.isSimulationSuccess(result) && result.result?.retval) {
+        return scValToNative(result.result.retval);
+      } else if (rpc.Api.isSimulationError(result)) {
+        logger.error(`Simulation failed for comet ${cometId} ${method}`, result?.error);
+      }
+      return undefined;
+    } catch (e) {
+      logger.error(`Error simulating comet ${cometId} ${method}: ${e}`);
+      return undefined;
+    }
+  }
+
+  private async simCall(
+    contractId: string,
+    method: string,
+    args: xdr.ScVal[]
+  ): Promise<rpc.Api.SimulateTransactionResponse> {
+    return this.simOperation(new Contract(contractId).call(method, ...args));
+  }
+
+  private async simOperation(op: xdr.Operation): Promise<rpc.Api.SimulateTransactionResponse> {
+    let account = new Account(Keypair.random().publicKey(), '123');
+    let tx = new TransactionBuilder(account, {
+      networkPassphrase: this.network.passphrase,
+      fee: BASE_FEE,
+      timebounds: { minTime: 0, maxTime: Math.floor(Date.now() / 1000) + 5 * 60 * 1000 },
+    })
+      .addOperation(op)
+      .build();
+    let stellarRpc = new rpc.Server(this.network.rpc, this.network.opts);
+    return await stellarRpc.simulateTransaction(tx);
   }
 
   /**
@@ -259,104 +432,6 @@ export class SorobanHelper {
     }
   }
 
-  /**
-   * Fetch the amount of USDC required to mint "lp_tokens" of LP tokens
-   * @param lp_tokens The amount of LP tokens to simulate minting
-   * @returns The amount of USDC required to mint the LP tokens, or undefined if the simulation failed
-   */
-  async simLPTokensGetUSDCIn(lp_tokens: bigint): Promise<bigint | undefined> {
-    try {
-      let comet = new Contract(APP_CONFIG.backstopTokenAddress);
-      let op = comet.call(
-        'dep_lp_tokn_amt_out_get_tokn_in',
-        ...[
-          nativeToScVal(APP_CONFIG.usdcAddress, { type: 'address' }),
-          nativeToScVal(lp_tokens, { type: 'i128' }),
-          nativeToScVal(1_000_000_0000000, { type: 'i128' }),
-          nativeToScVal(APP_CONFIG.backstopTokenAddress, {
-            type: 'address',
-          }),
-        ]
-      );
-      let account = new Account(Keypair.random().publicKey(), '123');
-      let tx = new TransactionBuilder(account, {
-        networkPassphrase: this.network.passphrase,
-        fee: BASE_FEE,
-        timebounds: { minTime: 0, maxTime: Math.floor(Date.now() / 1000) + 5 * 60 * 1000 },
-      })
-        .addOperation(op)
-        .build();
-      let stellarRpc = new rpc.Server(this.network.rpc, this.network.opts);
-
-      let result = await stellarRpc.simulateTransaction(tx);
-      if (rpc.Api.isSimulationSuccess(result) && result.result?.retval) {
-        return scValToNative(result.result.retval);
-      } else if (rpc.Api.isSimulationError(result)) {
-        logger.error(
-          `Simulation failed for simLPTokensGetUSDCIn with lp_tokens: ${lp_tokens}`,
-          result?.error
-        );
-        return undefined;
-      } else {
-        logger.error(
-          `Unknown simulation result for simLPTokensGetUSDCIn with lp_tokens: ${lp_tokens}`
-        );
-        return undefined;
-      }
-    } catch (e) {
-      logger.error(`Error calculating comet token value: ${e}`);
-      return undefined;
-    }
-  }
-
-  /**
-   * Fetch the amount of USDC that would be received by withdrawing "lp_tokens" of LP tokens
-   * @param lp_tokens The amount of LP tokens withdrawing
-   * @returns The amount of USDC that would be received by withdrawing the LP tokens, or undefined if the simulation failed
-   */
-  async simLPTokensToUSDC(lp_tokens: bigint): Promise<bigint | undefined> {
-    try {
-      let comet = new Contract(APP_CONFIG.backstopTokenAddress);
-      let op = comet.call(
-        'wdr_tokn_amt_in_get_lp_tokns_out',
-        ...[
-          nativeToScVal(APP_CONFIG.usdcAddress, { type: 'address' }),
-          nativeToScVal(lp_tokens, { type: 'i128' }),
-          nativeToScVal(0, { type: 'i128' }),
-          nativeToScVal(APP_CONFIG.backstopAddress, { type: 'address' }),
-        ]
-      );
-      let account = new Account(Keypair.random().publicKey(), '123');
-      let tx = new TransactionBuilder(account, {
-        networkPassphrase: this.network.passphrase,
-        fee: BASE_FEE,
-        timebounds: { minTime: 0, maxTime: Math.floor(Date.now() / 1000) + 5 * 60 * 1000 },
-      })
-        .addOperation(op)
-        .build();
-      let stellarRpc = new rpc.Server(this.network.rpc, this.network.opts);
-
-      let result = await stellarRpc.simulateTransaction(tx);
-      if (rpc.Api.isSimulationSuccess(result) && result.result?.retval) {
-        return scValToNative(result.result.retval);
-      } else if (rpc.Api.isSimulationError(result)) {
-        logger.error(
-          `Simulation failed for simLPTokensToUSDC with lp_tokens: ${lp_tokens}`,
-          result?.error
-        );
-        return undefined;
-      } else {
-        logger.error(
-          `Unknown simulation result for simLPTokensToUSDC with lp_tokens: ${lp_tokens}`
-        );
-        return undefined;
-      }
-    } catch (e) {
-      logger.error(`Error calculating comet token value: ${e}`);
-      return undefined;
-    }
-  }
-
   async simBalance(tokenId: string, userId: string): Promise<bigint> {
     try {
       let contract = new Contract(tokenId);
@@ -380,36 +455,6 @@ export class SorobanHelper {
     } catch (e) {
       logger.error(`Error fetching balance: ${e}`);
       return 0n;
-    }
-  }
-
-  /**
-   * Fetch the owner of the Interest Filler contract
-   * @returns The owner address or undefined if the simulation failed
-   */
-  async simInterestFillerOwner(): Promise<string | undefined> {
-    try {
-      let contract = new Contract(APP_CONFIG.interestFillerAddress);
-      let op = contract.call('get_owner', ...[]);
-      let account = new Account(Keypair.random().publicKey(), '123');
-      let tx = new TransactionBuilder(account, {
-        networkPassphrase: this.network.passphrase,
-        fee: BASE_FEE,
-        timebounds: { minTime: 0, maxTime: Math.floor(Date.now() / 1000) + 5 * 60 * 1000 },
-      })
-        .addOperation(op)
-        .build();
-      let stellarRpc = new rpc.Server(this.network.rpc, this.network.opts);
-
-      let result = await stellarRpc.simulateTransaction(tx);
-      if (rpc.Api.isSimulationSuccess(result) && result.result?.retval) {
-        return scValToNative(result.result.retval);
-      } else {
-        return undefined;
-      }
-    } catch (e) {
-      logger.error(`Error fetching interest filler owner: ${e}`);
-      return undefined;
     }
   }
 
@@ -478,6 +523,33 @@ export class SorobanHelper {
       logger.error(`Tx failed to simlate: ${ContractErrorType[error.type]}`);
       throw error;
     }
+  }
+
+  /**
+   * Submit a classic (non-Soroban) operation, such as a path payment
+   * @param operation - The operation to submit
+   * @param keypair - The keypair of the source account
+   */
+  async submitClassicTransaction(
+    operation: xdr.Operation,
+    keypair: Keypair
+  ): Promise<rpc.Api.GetSuccessfulTransactionResponse & { txHash: string }> {
+    const stellarRpc = new rpc.Server(this.network.rpc, this.network.opts);
+    const fee =
+      this.feeLevel === 'high'
+        ? (APP_CONFIG.highBaseFee ?? 10000).toString()
+        : (APP_CONFIG.baseFee ?? 5000).toString();
+    const account = await stellarRpc.getAccount(keypair.publicKey());
+    const tx = new TransactionBuilder(account, {
+      networkPassphrase: this.network.passphrase,
+      fee: fee,
+      timebounds: { minTime: 0, maxTime: Math.floor(Date.now() / 1000) + 5 * 60 },
+    })
+      .addOperation(operation)
+      .build();
+    tx.sign(keypair);
+    logger.info(`Submitting classic transaction ${tx.hash().toString('hex')}: ${tx.toXDR()}`);
+    return await this.sendTransaction(tx);
   }
 
   private async sendTransaction(

@@ -43,7 +43,6 @@ jest.mock('../src/utils/config.js', () => {
   return {
     APP_CONFIG: {
       backstopAddress: 'backstopAddress',
-      backstopTokenAddress: 'backstopTokenAddress',
       pools: [
         {
           poolAddress: 'pool1',
@@ -693,51 +692,9 @@ describe('checkUsersForLiquidationsAndBadDebt', () => {
         poolId: mockPool.id,
         user: APP_CONFIG.backstopAddress,
         auctionType: AuctionType.BadDebt,
-        bid: [USDC],
-        lot: [APP_CONFIG.backstopTokenAddress],
-        auctionPercent: 100,
-      },
-    ]);
-  });
-
-  it('should respect pool max positions for bad debt auctions', async () => {
-    const user_ids = [APP_CONFIG.backstopAddress];
-
-    mockedSorobanHelper.loadPool.mockResolvedValue(mockPool);
-    mockBackstopPositionsEstimate.totalEffectiveLiabilities = 1000;
-    mockBackstopPositionsEstimate.totalEffectiveCollateral = 0;
-    // max positions is 4, so at most 3 positions should be used (given 1 is reserved for the lot asset)
-    mockBackstopPositions.positions = new Positions(
-      new Map([
-        [USDC_ID, 2000n],
-        [XLM_ID, 3000n],
-        [EURC_ID, 4000n],
-        [AQUA_ID, 5000n],
-      ]),
-      new Map(),
-      new Map()
-    );
-    mockedSorobanHelper.loadUserPositionEstimate.mockResolvedValue({
-      estimate: mockBackstopPositionsEstimate,
-      user: mockBackstopPositions,
-    });
-    mockedSorobanHelper.loadAuction.mockResolvedValue(undefined);
-
-    const result = await checkUsersForLiquidationsAndBadDebt(
-      db,
-      mockedSorobanHelper,
-      mockPool.id,
-      user_ids
-    );
-
-    expect(result).toEqual([
-      {
-        type: WorkSubmissionType.AuctionCreation,
-        poolId: mockPool.id,
-        user: APP_CONFIG.backstopAddress,
-        auctionType: AuctionType.BadDebt,
-        bid: [USDC, XLM, EURC],
-        lot: [APP_CONFIG.backstopTokenAddress],
+        // the pool selects the debt batch and backstop tier
+        bid: [],
+        lot: [],
         auctionPercent: 100,
       },
     ]);

@@ -49,14 +49,18 @@ export interface AppConfig {
   name: string;
   rpcURL: string;
   networkPassphrase: string;
-  backstopTokenAddress: string;
   backstopAddress: string;
   usdcAddress: string;
-  blndAddress: string;
-  interestFillerAddress: string;
+  // The classic Stellar asset for `usdcAddress`, formatted as `code:issuer`
+  usdcAsset: string;
   workerKeypair: Keypair;
   fillerKeypair: Keypair;
   pools: PoolConfig[];
+  // default fields
+  // (Default - 0.01) The max slippage allowed when buying XLM or minting LP tokens, as a decimal
+  slippage: number;
+  // (Default - 20) The minimum backstop credit value required to create an interest auction
+  minInterestValue: number;
   // optional fields
   notificationLevel: NotificationLevel | undefined;
   horizonURL: string | undefined;
@@ -89,14 +93,15 @@ export function validateAppConfig(config: any): boolean {
     typeof config.rpcURL !== 'string' ||
     typeof config.networkPassphrase !== 'string' ||
     typeof config.backstopAddress !== 'string' ||
-    typeof config.backstopTokenAddress !== 'string' ||
     typeof config.usdcAddress !== 'string' ||
-    typeof config.blndAddress !== 'string' ||
-    typeof config.interestFillerAddress !== 'string' ||
+    typeof config.usdcAsset !== 'string' ||
+    !config.usdcAsset.includes(':') ||
     typeof config.workerKeypair !== 'string' ||
     typeof config.fillerKeypair !== 'string' ||
     !Array.isArray(config.pools) ||
     // default fields
+    (config.slippage !== undefined && typeof config.slippage !== 'number') ||
+    (config.minInterestValue !== undefined && typeof config.minInterestValue !== 'number') ||
     (config.notificationLevel !== undefined &&
       !Object.values(NotificationLevel).includes(config.notificationLevel)) ||
     // optional fields
@@ -114,6 +119,8 @@ export function validateAppConfig(config: any): boolean {
 
   config.workerKeypair = Keypair.fromSecret(config.workerKeypair);
   config.fillerKeypair = Keypair.fromSecret(config.fillerKeypair);
+  config.slippage = config.slippage ?? 0.01;
+  config.minInterestValue = config.minInterestValue ?? 20;
 
   return (
     config.pools.every(validatePoolConfig) &&

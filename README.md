@@ -1,8 +1,8 @@
 # Auctioneer Bot
 
-The auctioneer bot monitors Blend V2 pools to create and bid on auctions. This includes user liquidation auctions, bad debt auctions, and interest auctions. The auctioneer focuses on completeness and pool safety over profit, but the existing code can be modified to meet any use case.
+The auctioneer bot monitors BLNT v3 pools to create and bid on auctions. This includes user liquidation auctions, bad debt auctions, and interest auctions. The auctioneer focuses on completeness and pool safety over profit, but the existing code can be modified to meet any use case.
 
-For more information please see [the Blend docs](https://docs.blend.capital/tech-docs/core-contracts/lending-pool).
+The BLNT v3 contracts are derived from Blend v2. For background on pools and auctions, see [the Blend docs](https://docs.blend.capital/tech-docs/core-contracts/lending-pool) and the [BLNT v3 contract specification](https://github.com/BLNT-Protocol/blnt-contracts-v3/blob/main/docs/V3_SYSTEM_SPEC.md).
 
 ## Safety
 
@@ -10,10 +10,12 @@ This software is made available under the MIT License, which disclaims all warra
 
 ## Getting Started
 
-It is recommended to run the auctioneer bot as a docker container. The image can be pulled with:
+It is recommended to run the auctioneer bot as a docker container. Build the image with:
 
 ```bash
-docker pull script3/auctioneer-bot:latest
+npm ci
+npm run build
+docker build -t auctioneer-bot:blnt-v3 .
 ```
 
 To run the container, you will need to mount a directory from the host to `/app/data` on the container. The directory must contain a config file named `config.json` at its root. Please see [Configuration](#configuration) for details on the configuration file.
@@ -22,7 +24,7 @@ The container will create a sqlite3 database that tracks bot activity and log fi
 
 Use the following command to run the container:
 ```bash
-docker run --restart always -d -v /path/on/host:/app/data script3/auctioneer-bot:latest
+docker run --restart always -d -v /path/on/host:/app/data auctioneer-bot:blnt-v3
 ```
 
 The auctioneer bot requires access to a Soroban RPC server, and is fairly chatty. We recommend running an Soroban RPC server on the same host to avoid issues with rate limiting / usage. Please see the Stellar documentation for running a [Soroban RPC](https://developers.stellar.org/docs/data/rpc). We recommend running the [Soroban RPC as a docker container](https://developers.stellar.org/docs/data/rpc/admin-guide#docker-image). The Auctioneer bot itself is not very resource intensive, and should work fine alongside an RPC with the suggested hardware requirements for the Soroban RPC server.
@@ -33,23 +35,35 @@ Auctions filled by the bot will have an entry populated in the `filled_auctions`
 
 ## Important Info
 
-This version only support V2 Blend pools.
-
-This bot does not automatically unwind all positions it bids on. It is recommended to manually adjust your positions as necessary as auctions get filled. 
+This bot does not automatically unwind all positions it bids on. It is recommended to manually adjust your positions as necessary as auctions get filled.
 
 Certain auctions cause your filler to take on liabilities, and if these assets are not cleared in a timely manner, could result in the filler also getting liquidated.
 
-To fill interest auctions, the bot must fill with a contract that implements the same interface as the [example interest filler contract](https://github.com/script3/interest-auction-filler). This is required to allow the bot to bid directly with USDC on interest auctions.
+### Backstop Tiers
+
+Each pool has up to three backstop tiers, and interest auctions rotate between them. The bid for an interest auction is the token of the selected tier: USDC, XLM, or a Comet LP containing USDC or XLM (e.g. BLNT:USDC or BLNT:XLM). The filler only needs to hold USDC, and acquires the bid token right before filling:
+
+* **USDC** - used directly.
+* **Comet LP with USDC** (e.g. BLNT:USDC) - minted with a single sided USDC deposit.
+* **Comet LP with XLM** (e.g. BLNT:XLM) - XLM is bought with USDC on the Stellar DEX, then minted with a single sided XLM deposit.
+* **XLM** - bought with USDC on the Stellar DEX.
+
+The filler then approves the backstop to spend exactly the bid amount, and fills the auction directly with the pool. These are separate transactions, so acquiring the bid token is not atomic with the fill. If the fill does not happen (e.g. another filler wins the auction), the acquired tokens are kept by the filler and used for future bids. The filler keeps 50 XLM in reserve for fees, and needs a trustline to the USDC asset.
+
+Interest auction lots are sent directly to the filler, and are not sold back to USDC.
+
+### Auctions
+
+* **Interest auctions** are created with an empty bid, letting the pool select the tier. The bot simulates the auction first, as the pool only includes the selected tier's share of the backstop credit in the lot. Lots can include up to 4 assets, and the backstop credit must be over `minInterestValue`.
+* **Bad debt auctions** are created with an empty bid and lot, letting the pool select the debt and tier. Lots are the selected tier's token, and are valued as the USDC received by selling it.
+* **User liquidation auctions** are unchanged from Blend v2.
+* **Protocol fee auctions** (auction type 3) are ignored.
+
+The tier tokens must be included in `supportedBid` to bid on interest auctions, and in `supportedLot` to bid on bad debt auctions. The bot logs each pool's tier tokens on startup.
 
 ### Configuration
 
-For an example config file that is configured to interact with [Blend 2 mainnet protocol](https://docs.blend.capital/), please see [example.config.json](https://github.com/script3/auctioneer-bot/blob/main/example.config.json).
-
-### Database Migration
-
-**It is highly recommended to create a backup of the database file before attempting any migration.**
-
-For auctioneers that were started before multi-pool functionality a db migration will be necessary. On startup of the updated auctioneer bot a command line argument will be required to be inputted with `-p` or `--prev-pool-id` followed by the pool id that the single pool auctioneer bot was using. The migration will update the database to the new schema and will populate the pool id column with the one provided.
+For an example config file that is configured to interact with the BLNT v3 mainnet deployment, please see [example.config.json](./example.config.json).
 
 #### General Settings
 
@@ -58,18 +72,19 @@ For auctioneers that were started before multi-pool functionality a db migration
 | `name` | A descriptive name for your bot instance. |
 | `rpcURL` | The URL of the Soroban RPC endpoint. |
 | `networkPassphrase` | The network passphrase identifying the Stellar network. |
-| `backstopAddress` | The address of the Blend backstop contract. |
-| `backstopTokenAddress` | The address of the Blend backstop token contract. |
+| `backstopAddress` | The address of the BLNT v3 backstop contract. |
 | `usdcAddress` | The address of the USDC token contract. |
-| `blndAddress` | The address of the BLND token contract. |
-| `interestFillerAddress` | A contract address used to help fill interest auctions. Must implement the same interface as [this example](https://github.com/script3/interest-auction-filler). |
+| `usdcAsset` | The classic Stellar asset for `usdcAddress`, formatted as `code:issuer`. Used to buy XLM on the DEX. |
 | `workerKeypair` | The secret key for the bot's auction creating account. This should be different from the filler as auction creation and auction bidding can happen simultaneously. **Keep this secret and secure!** |
 | `fillerKeypair` | The secret key for the bot's auction filler account. This should be different from the worker as auction creation and auction bidding can happen simultaneously. **Keep this secret and secure!** |
 | `pools` | A list of pool configs that dictates what pools are monitored |
+| `slippage` | (Default - `0.01`) The max slippage allowed when buying XLM or minting LP tokens, as a decimal. Also used to discount XLM based bid and lot valuations. |
+| `minInterestValue` | (Default - `20`) The minimum backstop credit value (in oracle units) required to attempt to create an interest auction. The pool requires the selected tier's share to be at least 20 USDC. |
 | `notificationLevel` | (Default - `med`) The severity level where notifications are sent to either the console or a webhook, if present. Can be one of `low`, `med`, or `high`. High notifications includes dropped actions, bad debt auctions, critical errors and liquidation auction fills. Med adds interest auction fills, liquidation auctions, and retried errors. Low adds additional info notifications and interest auctions. |
 | `baseFee` | (Default - `5000`) The minimum inclusion fee that will be specified for a normal transaction, otherwise feeStats p70. |
 | `highBaseFee` | (Default - `10000`) The minimum inclusion fee that will be specified for a high priority transaction, otherwise feeStats p90. This is considered any auction fill where the estimated profit is over 10 oracle units (almost always $10). |
-| `priceSources` | (Optional) A list of assets that will have prices sourced from exchanges instead of the pool oracle. |
+| `horizonURL` | (Optional) The URL of a Horizon server, used for DEX price sources. |
+| `priceSources` | (Optional) A list of assets that will have prices sourced from exchanges instead of the pool oracle. A price source for XLM is recommended, as it is used when buying XLM. |
 | `profits` | (Optional) A list of auction profits to define different profit percentages used for matching auctions. |
 | `slackWebhook` | (Optional) A slack webhook URL to post updates to (https://hooks.slack.com/services/). Leave undefined if no webhooks are required. |
 | `discordWebhook` | (Optional) A Discord webhook URL to post updates to. Leave undefined if no webhooks are required. |
@@ -86,8 +101,8 @@ The `pools` array contains configurations for individual pools to monitor. Each 
 | `minHealthFactor` | The minimum health factor the bot will take on during liquidation and bad debt auctions, as calculated by `collateral / liabilities`. |
 | `defaultProfitPct` | The default profit percentage required to bid on an auction, as a decimal. (e.g. 0.08 = 8%) |
 | `forceFill` | Boolean flag to indicate if the bot should force fill auctions even if profit expectations aren't met to ensure pool health. |
-| `supportedBid` | An array of asset addresses that the bot is allowed to bid with. Bids are taken as additional liabilities (dTokens) for liquidation and bad debt auctions, and tokens for interest auctions. Must include the `backstopTokenAddress` to bid on interest auctions. |
-| `supportedLot` | An array of asset addresses that the bot is allowed to receive. Lots are given as collateral (bTokens) for liquidation auctions and tokens for interest and bad debt auctions. The bot should have trustlines to all assets that are Stellar assets. Must include `backstopTokenAddress` to bid on bad debt auctions. |
+| `supportedBid` | An array of asset addresses that the bot is allowed to bid with. Bids are taken as additional liabilities (dTokens) for liquidation and bad debt auctions, and tier tokens for interest auctions. Must include the pool's tier tokens to bid on interest auctions. |
+| `supportedLot` | An array of asset addresses that the bot is allowed to receive. Lots are given as collateral (bTokens) for liquidation auctions, reserve tokens for interest auctions, and tier tokens for bad debt auctions. The bot should have trustlines to all assets that are Stellar assets. Must include the pool's tier tokens to bid on bad debt auctions. |
 
 #### Price Sources
 
@@ -135,17 +150,12 @@ Each profit entry has the following fields:
 
 ## Build
 
-If you make modifications to the bot, you can build a new dockerfile by running:
+To build a docker image for a specific platform, run:
 
 ```bash
 npm run build:docker-{arm, x86}
 ```
 
-You can then follow the instructions in [Getting Started](#getting-started), but instead use `auctioneer-bot-{arm, x86}` as the docker image.
+You can then follow the instructions in [Getting Started](#getting-started), but instead use `auctioneer-bot-v{version}-{arm, x86}` as the docker image.
 
 The bot can also be run locally with node, but you will need to invoke `start.sh` to initialize a database at `./data` and a location to place logs at `./data/logs`.
-
-
-
-
-
