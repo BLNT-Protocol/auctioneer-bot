@@ -12,6 +12,6 @@ COPY ./db ./db
 RUN npm install
 
 RUN chmod +x start.sh
-run chmod +x ./db/setup_db.sh
+RUN chmod +x ./db/setup_db.sh
 
 ENTRYPOINT ["./start.sh"]
