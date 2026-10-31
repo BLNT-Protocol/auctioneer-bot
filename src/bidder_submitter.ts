@@ -6,6 +6,7 @@ import { getFillerAvailableBalances, managePositions } from './filler.js';
 import { APP_CONFIG } from './utils/config.js';
 import { AuctioneerDatabase, AuctionEntry, AuctionType } from './utils/db.js';
 import { serializeError, stringify } from './utils/json.js';
+import { setInterestAuctionDonateAuth } from './utils/ledger_auth.js';
 import { logger } from './utils/logger.js';
 import {
   getNotificationLevelForAuction,
@@ -134,14 +135,31 @@ export class BidderSubmitter extends SubmissionQueue<BidderSubmission> {
             this.db
           );
         }
+        const operation = pool.submit({
+          from: auctionBid.auctionEntry.filler,
+          spender: auctionBid.auctionEntry.filler,
+          to: auctionBid.auctionEntry.filler,
+          requests: fill.requests,
+        });
         const result = await sorobanHelper.submitTransaction(
-          pool.submit({
-            from: auctionBid.auctionEntry.filler,
-            spender: auctionBid.auctionEntry.filler,
-            to: auctionBid.auctionEntry.filler,
-            requests: fill.requests,
-          }),
-          APP_CONFIG.fillerKeypair
+          operation,
+          APP_CONFIG.fillerKeypair,
+          auctionBid.auctionEntry.auction_type === AuctionType.Interest
+            ? {
+                prepareAuthForLedger: (authEntries, targetLedger) => {
+                  const [scaledAuction] = auction.scale(targetLedger, fill.percent);
+                  const bidAmount = scaledAuction.data.bid.values().next().value;
+                  if (bidAmount === undefined) {
+                    throw new Error('Interest auction has no bid amount');
+                  }
+                  setInterestAuctionDonateAuth(
+                    authEntries,
+                    auctionBid.auctionEntry.user_id,
+                    bidAmount
+                  );
+                },
+              }
+            : undefined
         );
         const [scaledAuction] = auction.scale(result.ledger, fill.percent);
         this.db.setFilledAuctionEntry({
