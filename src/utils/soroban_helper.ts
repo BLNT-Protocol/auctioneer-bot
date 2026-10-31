@@ -26,6 +26,7 @@ import {
   xdr,
 } from '@stellar/stellar-sdk';
 import { APP_CONFIG } from './config.js';
+import { bindTransactionToNextLedger, PrepareAuthForLedger } from './ledger_auth.js';
 import { logger } from './logger.js';
 import { loadPoolUserV3, loadPoolV3 } from './pool_v3.js';
 
@@ -37,6 +38,10 @@ export interface PoolUserEst {
 export interface ErrorTimeout {
   timeout: number;
   error: any;
+}
+
+export interface SubmitTransactionOptions {
+  prepareAuthForLedger?: PrepareAuthForLedger;
 }
 
 // immutable on-chain data, shared across SorobanHelper instances
@@ -460,7 +465,8 @@ export class SorobanHelper {
 
   async submitTransaction<T>(
     operation: string,
-    keypair: Keypair
+    keypair: Keypair,
+    options?: SubmitTransactionOptions
   ): Promise<rpc.Api.GetSuccessfulTransactionResponse & { txHash: string }> {
     const stellarRpc = new rpc.Server(this.network.rpc, this.network.opts);
 
@@ -515,6 +521,14 @@ export class SorobanHelper {
     }
 
     if (rpc.Api.isSimulationSuccess(simResult)) {
+      if (options?.prepareAuthForLedger) {
+        tx = bindTransactionToNextLedger(
+          tx,
+          simResult.latestLedger,
+          simResult.result?.auth ?? [],
+          options.prepareAuthForLedger
+        );
+      }
       let assembledTx = rpc.assembleTransaction(tx, simResult).build();
       assembledTx.sign(keypair);
       return await this.sendTransaction(assembledTx);

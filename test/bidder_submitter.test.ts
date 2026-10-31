@@ -522,6 +522,9 @@ describe('BidderSubmitter', () => {
       expect(mockedPrepareInterestBid.mock.invocationCallOrder[0]).toBeLessThan(
         mockedSorobanHelper.submitTransaction.mock.invocationCallOrder[0]
       );
+      expect(mockedSorobanHelper.submitTransaction.mock.calls[0][2]).toEqual({
+        prepareAuthForLedger: expect.any(Function),
+      });
       expect(mockDb.setFilledAuctionEntry).toHaveBeenCalled();
       // the lot is sent directly to the filler, so no unwind is required
       expect(bidderSubmitter.addSubmission).not.toHaveBeenCalled();
