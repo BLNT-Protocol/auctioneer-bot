@@ -18,6 +18,8 @@ npm run build
 docker build -t auctioneer-bot:blnt-v3 .
 ```
 
+Prebuilt images (amd64 and arm64) are published to `ghcr.io/blnt-protocol/auctioneer-bot` by the Publish Docker workflow: `:dev` tracks `main`, and version tags `vX.Y.Z` publish `:X.Y.Z`, `:X.Y` and `:latest`.
+
 To run the container, you will need to mount a directory from the host to `/app/data` on the container. The directory must contain a config file named `config.json` at its root. Please see [Configuration](#configuration) for details on the configuration file.
 
 The container will create a sqlite3 database that tracks bot activity and log files in the mounted directory.
