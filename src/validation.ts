@@ -1,5 +1,6 @@
 import { Asset } from '@stellar/stellar-sdk';
 import { getTierTokenRoute } from './bid_token.js';
+import { loadAndValidateAuctionFiller } from './utils/auction_filler.js';
 import { APP_CONFIG } from './utils/config.js';
 import { logger } from './utils/logger.js';
 import { SorobanHelper } from './utils/soroban_helper.js';
@@ -27,6 +28,10 @@ export async function validateBot(sorobanHelper: SorobanHelper): Promise<void> {
     );
   }
 
+  const auctionFillerConfig = APP_CONFIG.auctionFillerAddress
+    ? await loadAndValidateAuctionFiller(sorobanHelper)
+    : undefined;
+
   for (const poolConfig of APP_CONFIG.pools) {
     // validate each pool loads and that each pool has the same backstop
     const pool = await sorobanHelper.loadPool(poolConfig.poolAddress);
@@ -41,7 +46,20 @@ export async function validateBot(sorobanHelper: SorobanHelper): Promise<void> {
     logger.info(`Pool ${pool.id} backstop tier tokens: ${tierTokens}`);
     for (const token of tierTokens) {
       if (poolConfig.supportedBid.includes('*') || poolConfig.supportedBid.includes(token)) {
-        await getTierTokenRoute(token, sorobanHelper);
+        if (auctionFillerConfig) {
+          if (
+            ![
+              auctionFillerConfig.usdc,
+              auctionFillerConfig.xlm,
+              auctionFillerConfig.blnt_usdc,
+              auctionFillerConfig.blnt_xlm,
+            ].includes(token)
+          ) {
+            throw new Error(`Atomic auction filler does not support tier token ${token}`);
+          }
+        } else {
+          await getTierTokenRoute(token, sorobanHelper);
+        }
       }
     }
   }

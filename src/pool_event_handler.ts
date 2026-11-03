@@ -5,6 +5,7 @@ import { canFillerBid } from './filler.js';
 import { updateUser } from './user.js';
 import { APP_CONFIG } from './utils/config.js';
 import { AuctioneerDatabase, AuctionEntry, AuctionType } from './utils/db.js';
+import { auctionTypeName, PROTOCOL_FEE_AUCTION_TYPE } from './utils/auction_type.js';
 import { stringify } from './utils/json.js';
 import { logger } from './utils/logger.js';
 import { deadletterEvent, sendEvent } from './utils/messages.js';
@@ -92,8 +93,17 @@ export class PoolEventHandler {
       }
 
       case PoolEventType.NewAuction: {
-        // ignore auction types the bot does not support (e.g. protocol fee auctions)
-        if (AuctionType[poolEvent.event.auctionType] === undefined) {
+        if (
+          poolEvent.event.auctionType === PROTOCOL_FEE_AUCTION_TYPE &&
+          !APP_CONFIG.auctionFillerAddress
+        ) {
+          logger.info('Ignoring protocol-fee auction because auctionFillerAddress is not set');
+          return;
+        }
+        if (
+          AuctionType[poolEvent.event.auctionType] === undefined &&
+          poolEvent.event.auctionType !== PROTOCOL_FEE_AUCTION_TYPE
+        ) {
           logger.info(
             `Ignoring unsupported auction type ${poolEvent.event.auctionType} in pool ${pool.id}`
           );
@@ -103,7 +113,7 @@ export class PoolEventHandler {
         if (!canFillerBid(pool.id, poolEvent.event.auctionData)) {
           const logMessage =
             `Auction Ignored\n` +
-            `Type: ${AuctionType[poolEvent.event.auctionType]}\n` +
+            `Type: ${auctionTypeName(poolEvent.event.auctionType)}\n` +
             `Pool: ${pool.id}\n` +
             `User: ${poolEvent.event.user}\n` +
             `Auction Data: ${stringify(poolEvent.event.auctionData, 2)}\n`;
@@ -127,7 +137,7 @@ export class PoolEventHandler {
 
         const logMessage =
           `New auction\n` +
-          `Type: ${AuctionType[poolEvent.event.auctionType]}\n` +
+          `Type: ${auctionTypeName(poolEvent.event.auctionType)}\n` +
           `Filler: ${APP_CONFIG.fillerKeypair.publicKey()}\n` +
           `Pool: ${pool.id}\n` +
           `User: ${poolEvent.event.user}\n` +
@@ -163,7 +173,7 @@ export class PoolEventHandler {
         const fillerAddress = poolEvent.event.filler;
         const logMessage =
           `Auction Fill Event\n` +
-          `Type ${AuctionType[poolEvent.event.auctionType]}\n` +
+          `Type ${auctionTypeName(poolEvent.event.auctionType)}\n` +
           `Filler: ${fillerAddress}\n` +
           `Pool: ${pool.id}\n` +
           `User: ${poolEvent.event.user}\n` +
@@ -184,7 +194,7 @@ export class PoolEventHandler {
           if (runResult.changes !== 0) {
             logger.info(
               `Auction Deleted\n` +
-                `Type: ${AuctionType[poolEvent.event.auctionType]}\n` +
+                `Type: ${auctionTypeName(poolEvent.event.auctionType)}\n` +
                 `Pool: ${pool.id}\n` +
                 `User: ${poolEvent.event.user}`
             );
@@ -231,7 +241,7 @@ export class PoolEventHandler {
         if (runResult.changes !== 0) {
           const logMessage =
             `Auction Deleted Before Fill\n` +
-            `Type: ${AuctionType[auctionType]}\n` +
+            `Type: ${auctionTypeName(auctionType)}\n` +
             `Pool: ${pool.id}\n` +
             `User: ${user}`;
           await sendNotification(

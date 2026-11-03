@@ -291,6 +291,36 @@ export class SorobanHelper {
     ]);
   }
 
+  /** Fetch the exact amount of tokenIn required for an exact-output Comet swap. */
+  async simCometSwapTokenIn(
+    cometId: string,
+    tokenIn: string,
+    tokenOut: string,
+    tokenAmountOut: bigint
+  ): Promise<bigint | undefined> {
+    try {
+      const result = await this.simCall(cometId, 'swap_exact_amount_out', [
+        nativeToScVal(tokenIn, { type: 'address' }),
+        nativeToScVal(1_000_000_0000000, { type: 'i128' }),
+        nativeToScVal(tokenOut, { type: 'address' }),
+        nativeToScVal(tokenAmountOut, { type: 'i128' }),
+        nativeToScVal(2n ** 127n - 1n, { type: 'i128' }),
+        nativeToScVal(cometId, { type: 'address' }),
+      ]);
+      if (rpc.Api.isSimulationSuccess(result) && result.result?.retval) {
+        const value = scValToNative(result.result.retval);
+        return Array.isArray(value) ? value[0] : undefined;
+      }
+      if (rpc.Api.isSimulationError(result)) {
+        logger.error(`Simulation failed for Comet exact-output swap ${cometId}`, result.error);
+      }
+      return undefined;
+    } catch (e) {
+      logger.error(`Error simulating Comet exact-output swap ${cometId}: ${e}`);
+      return undefined;
+    }
+  }
+
   /**
    * Fetch the amount of "tokenOut" received by burning "lpTokens" of a Comet LP via a single sided withdrawal
    * @param holder - An address that holds at least "lpTokens", used for the simulation
@@ -335,6 +365,19 @@ export class SorobanHelper {
     args: xdr.ScVal[]
   ): Promise<rpc.Api.SimulateTransactionResponse> {
     return this.simOperation(new Contract(contractId).call(method, ...args));
+  }
+
+  /** Simulate a read-only contract call and return its value. */
+  async simContractCall(
+    contractId: string,
+    method: string,
+    args: xdr.ScVal[]
+  ): Promise<xdr.ScVal | undefined> {
+    const result = await this.simCall(contractId, method, args);
+    if (rpc.Api.isSimulationSuccess(result) && result.result?.retval) {
+      return result.result.retval;
+    }
+    return undefined;
   }
 
   private async simOperation(op: xdr.Operation): Promise<rpc.Api.SimulateTransactionResponse> {

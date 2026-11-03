@@ -51,6 +51,12 @@ export interface AppConfig {
   networkPassphrase: string;
   backstopAddress: string;
   usdcAddress: string;
+  // Optional atomic BLNT V3 interest/protocol-fee auction filler contract.
+  auctionFillerAddress: string | undefined;
+  auctionFillerBlntAddress: string | undefined;
+  auctionFillerXlmAddress: string | undefined;
+  auctionFillerBlntUsdcAddress: string | undefined;
+  auctionFillerBlntXlmAddress: string | undefined;
   // The classic Stellar asset for `usdcAddress`, formatted as `code:issuer`
   usdcAsset: string;
   workerKeypair: Keypair;
@@ -88,12 +94,25 @@ export function validateAppConfig(config: any): boolean {
     return false;
   }
 
+  const auctionFillerFields = [
+    config.auctionFillerAddress,
+    config.auctionFillerBlntAddress,
+    config.auctionFillerXlmAddress,
+    config.auctionFillerBlntUsdcAddress,
+    config.auctionFillerBlntXlmAddress,
+  ];
+  const hasAuctionFillerConfig = auctionFillerFields.some((value) => value !== undefined);
+  const hasCompleteAuctionFillerConfig = auctionFillerFields.every(
+    (value) => typeof value === 'string'
+  );
+
   if (
     typeof config.name !== 'string' ||
     typeof config.rpcURL !== 'string' ||
     typeof config.networkPassphrase !== 'string' ||
     typeof config.backstopAddress !== 'string' ||
     typeof config.usdcAddress !== 'string' ||
+    (hasAuctionFillerConfig && !hasCompleteAuctionFillerConfig) ||
     typeof config.usdcAsset !== 'string' ||
     !config.usdcAsset.includes(':') ||
     typeof config.workerKeypair !== 'string' ||
