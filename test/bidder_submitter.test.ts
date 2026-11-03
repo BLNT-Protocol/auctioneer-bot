@@ -571,6 +571,28 @@ describe('BidderSubmitter', () => {
     expect(bidderSubmitter.containsAuction(auctionEntry)).toBe(false);
   });
 
+  it('should distinguish auctions with the same type and user in different pools', () => {
+    const queuedAuction: AuctionEntry = {
+      pool_id: mockPool.id,
+      user_id: 'test-user',
+      auction_type: AuctionType.Interest,
+    } as AuctionEntry;
+    bidderSubmitter.addSubmission(
+      {
+        type: BidderSubmissionType.BID,
+        auctionEntry: queuedAuction,
+      } as AuctionBid,
+      1
+    );
+
+    expect(
+      bidderSubmitter.containsAuction({
+        ...queuedAuction,
+        pool_id: 'CB2GWHIXFZ2L6KTVKGWMLTV67B3HTGC4UKTHDLQHNWQE6O7VDXP3EAGT',
+      })
+    ).toBe(false);
+  });
+
   it('should handle dropped bid', async () => {
     const submission: AuctionBid = {
       type: BidderSubmissionType.BID,

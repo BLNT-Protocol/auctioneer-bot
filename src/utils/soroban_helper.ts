@@ -47,6 +47,7 @@ export interface SubmitTransactionOptions {
 // immutable on-chain data, shared across SorobanHelper instances
 const tierTokenCache = new Map<string, string[]>();
 const cometTokenCache = new Map<string, string[]>();
+const I128_MAX = 2n ** 127n - 1n;
 
 export class SorobanHelper {
   network: Network;
@@ -286,7 +287,7 @@ export class SorobanHelper {
     return this.simCometCall(cometId, 'dep_lp_tokn_amt_out_get_tokn_in', [
       nativeToScVal(tokenIn, { type: 'address' }),
       nativeToScVal(lpTokens, { type: 'i128' }),
-      nativeToScVal(1_000_000_0000000, { type: 'i128' }),
+      nativeToScVal(I128_MAX, { type: 'i128' }),
       nativeToScVal(cometId, { type: 'address' }),
     ]);
   }
@@ -301,10 +302,10 @@ export class SorobanHelper {
     try {
       const result = await this.simCall(cometId, 'swap_exact_amount_out', [
         nativeToScVal(tokenIn, { type: 'address' }),
-        nativeToScVal(1_000_000_0000000, { type: 'i128' }),
+        nativeToScVal(I128_MAX, { type: 'i128' }),
         nativeToScVal(tokenOut, { type: 'address' }),
         nativeToScVal(tokenAmountOut, { type: 'i128' }),
-        nativeToScVal(2n ** 127n - 1n, { type: 'i128' }),
+        nativeToScVal(I128_MAX, { type: 'i128' }),
         nativeToScVal(cometId, { type: 'address' }),
       ]);
       if (rpc.Api.isSimulationSuccess(result) && result.result?.retval) {

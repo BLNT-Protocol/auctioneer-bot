@@ -62,6 +62,7 @@ export class BidderSubmitter extends SubmissionQueue<BidderSubmission> {
     return this.submissions.some((submission) => {
       if (submission.submission.type === BidderSubmissionType.BID) {
         return (
+          submission.submission.auctionEntry.pool_id === auctionEntry.pool_id &&
           submission.submission.auctionEntry.auction_type === auctionEntry.auction_type &&
           submission.submission.auctionEntry.user_id === auctionEntry.user_id
         );
