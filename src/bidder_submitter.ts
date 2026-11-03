@@ -9,6 +9,7 @@ import { auctionTypeName, PROTOCOL_FEE_AUCTION_TYPE } from './utils/auction_type
 import { serializeError, stringify } from './utils/json.js';
 import { setInterestAuctionDonateAuth } from './utils/ledger_auth.js';
 import {
+  assertAtomicBidPlanWithinApprovedCost,
   AuctionFillerContract,
   loadAndValidateAuctionFiller,
   planAtomicBid,
@@ -155,6 +156,7 @@ export class BidderSubmitter extends SubmissionQueue<BidderSubmission> {
             throw new Error('Auction filler requires exactly one bid token');
           }
           const plan = await planAtomicBid(bidToken, bidAmount, config, sorobanHelper);
+          assertAtomicBidPlanWithinApprovedCost(plan, fill.bidValue);
           const filler = new AuctionFillerContract(APP_CONFIG.auctionFillerAddress!);
           operation =
             auctionBid.auctionEntry.auction_type === AuctionType.Interest

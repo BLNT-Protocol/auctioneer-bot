@@ -1,5 +1,6 @@
 import { Keypair, nativeToScVal, scValToNative, xdr } from '@stellar/stellar-sdk';
 import {
+  assertAtomicBidPlanWithinApprovedCost,
   AuctionFillerConfig,
   AuctionFillerContract,
   loadAndValidateAuctionFiller,
@@ -93,6 +94,15 @@ describe('atomic auction filler', () => {
       maxUsdcIn: 202n,
       maxBlntIn: 202n,
     });
+  });
+
+  it('rejects a submission re-quote above the approved USDC cost', () => {
+    expect(() =>
+      assertAtomicBidPlanWithinApprovedCost({ maxUsdcIn: 600_000_001n, maxBlntIn: 0n }, 60)
+    ).toThrow('Atomic auction bid re-quote exceeds approved USDC cost');
+    expect(() =>
+      assertAtomicBidPlanWithinApprovedCost({ maxUsdcIn: 600_000_000n, maxBlntIn: 0n }, 60)
+    ).not.toThrow();
   });
 
   it('builds the interest and protocol-fee entrypoints', () => {

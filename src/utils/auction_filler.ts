@@ -16,6 +16,8 @@ export interface AtomicBidPlan {
   maxBlntIn: bigint;
 }
 
+const USDC_SCALAR = 10_000_000;
+
 let validatedConfig: AuctionFillerConfig | undefined;
 
 export class AuctionFillerContract {
@@ -130,6 +132,22 @@ function addSlippage(amount: bigint): bigint {
   const scalar = 1_000_000n;
   const multiplier = BigInt(Math.ceil((1 + APP_CONFIG.slippage) * Number(scalar)));
   return (amount * multiplier + scalar - 1n) / scalar;
+}
+
+/** Reject a submission-time quote that costs more than the quote approved as profitable. */
+export function assertAtomicBidPlanWithinApprovedCost(
+  plan: AtomicBidPlan,
+  approvedBidValue: number
+): void {
+  const approvedMaxUsdcIn = Math.ceil(approvedBidValue * USDC_SCALAR);
+  if (!Number.isSafeInteger(approvedMaxUsdcIn) || approvedMaxUsdcIn < 0) {
+    throw new Error(`Invalid approved atomic auction bid value: ${approvedBidValue}`);
+  }
+  if (plan.maxUsdcIn > BigInt(approvedMaxUsdcIn)) {
+    throw new Error(
+      `Atomic auction bid re-quote exceeds approved USDC cost: ${plan.maxUsdcIn} > ${approvedMaxUsdcIn}`
+    );
+  }
 }
 
 async function requiredInput(value: Promise<bigint | undefined>, route: string): Promise<bigint> {
