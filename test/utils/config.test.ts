@@ -101,6 +101,26 @@ describe('validateAppConfig', () => {
     expect(validateAppConfig(complete)).toBe(true);
   });
 
+  it('should reject empty auction filler deployment bindings', () => {
+    const fields = [
+      'auctionFillerAddress',
+      'auctionFillerBlntAddress',
+      'auctionFillerXlmAddress',
+      'auctionFillerBlntUsdcAddress',
+      'auctionFillerBlntXlmAddress',
+    ];
+    for (const field of fields) {
+      const config = buildConfig();
+      config.auctionFillerAddress = 'filler';
+      config.auctionFillerBlntAddress = 'blnt';
+      config.auctionFillerXlmAddress = 'xlm';
+      config.auctionFillerBlntUsdcAddress = 'blnt-usdc';
+      config.auctionFillerBlntXlmAddress = 'blnt-xlm';
+      config[field] = '   ';
+      expect(validateAppConfig(config)).toBe(false);
+    }
+  });
+
   it('should return false for non-number slippage or min interest value', () => {
     const config = buildConfig();
     config.slippage = '0.01';

@@ -24,6 +24,7 @@ import { SorobanHelper } from '../src/utils/soroban_helper';
 import { inMemoryAuctioneerDb, mockPool, mockPoolOracle } from './helpers/mocks';
 import { stringify } from '../src/utils/json';
 import { Api } from '@stellar/stellar-sdk/rpc';
+import { APP_CONFIG } from '../src/utils/config';
 
 // Mock dependencies
 
@@ -108,6 +109,7 @@ describe('BidderSubmitter', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    APP_CONFIG.auctionFillerAddress = undefined;
     mockDb = inMemoryAuctioneerDb();
     bidderSubmitter = new BidderSubmitter(mockDb);
   });
@@ -136,7 +138,9 @@ describe('BidderSubmitter', () => {
     };
     mockedCalcAuctionFill.mockResolvedValue(auction_fill);
     let submissionResult: any = {
-      ledger: 1000,
+      // Inclusion is delayed 100 ledgers past the planned fill. The bid side
+      // falls from 100% to 50%, while the lot remains at 100%.
+      ledger: 1100,
       txHash: 'mock-tx-hash',
       latestLedgerCloseTime: Date.now(),
     };
@@ -162,11 +166,11 @@ describe('BidderSubmitter', () => {
       filler: submission.auctionEntry.filler,
       user_id: auction.user,
       auction_type: submission.auctionEntry.auction_type,
-      bid: new Map<string, bigint>([['USD', BigInt(500)]]),
-      bid_total: auction_fill.bidValue,
+      bid: new Map<string, bigint>([['USD', BigInt(250)]]),
+      bid_total: auction_fill.bidValue / 2,
       lot: new Map<string, bigint>([['USD', BigInt(1000)]]),
       lot_total: auction_fill.lotValue,
-      est_profit: auction_fill.lotValue - auction_fill.bidValue,
+      est_profit: auction_fill.lotValue - auction_fill.bidValue / 2,
       fill_block: submissionResult.ledger,
       timestamp: submissionResult.latestLedgerCloseTime,
     };
@@ -188,7 +192,7 @@ describe('BidderSubmitter', () => {
         filledAuction: {
           type: submission.auctionEntry.auction_type,
           user: submission.auctionEntry.user_id,
-          scaleBlock: auction_fill.block,
+          scaleBlock: submissionResult.ledger,
           filled: false,
           fillHash: undefined,
           data: {
@@ -450,6 +454,75 @@ describe('BidderSubmitter', () => {
     );
   });
 
+  it('should recover persisted atomic claims without queuing duplicates', () => {
+    const claim = {
+      id: `${mockPool.id}:${AuctionType.Interest}:750`,
+      filler_address: mockPool.id,
+      pool_id: mockPool.id,
+      auction_type: AuctionType.Interest,
+      assets: ['USD'],
+    };
+    APP_CONFIG.auctionFillerAddress = mockPool.id;
+    mockDb.getAllPendingClaimEntries = jest.fn().mockReturnValue([claim]);
+    bidderSubmitter.addSubmission = jest.fn((submission, maxRetries) => {
+      bidderSubmitter['submissions'].push({
+        retries: maxRetries,
+        timestamp: 0,
+        minRetryTimeout: 1000,
+        submission,
+      });
+    });
+
+    bidderSubmitter.recoverPendingClaims();
+    bidderSubmitter.recoverPendingClaims();
+
+    expect(bidderSubmitter.addSubmission).toHaveBeenCalledTimes(1);
+    expect(bidderSubmitter.addSubmission).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: BidderSubmissionType.UNWIND,
+        poolId: mockPool.id,
+        claimAuctionFiller: true,
+        auctionFillerAddress: mockPool.id,
+        pendingClaimId: claim.id,
+        claimAssets: claim.assets,
+      }),
+      2
+    );
+  });
+
+  it('should delete a persisted atomic claim only after a confirmed claim transaction', async () => {
+    APP_CONFIG.auctionFillerAddress = mockPool.id;
+    mockedSorobanHelper.submitTransaction.mockResolvedValue({
+      ledger: 12345,
+      txHash: 'claim-hash',
+    } as Api.GetSuccessfulTransactionResponse);
+    const pendingClaimId = `${mockPool.id}:${AuctionType.Interest}:750`;
+    const submission: FillerUnwind = {
+      type: BidderSubmissionType.UNWIND,
+      poolId: mockPool.id,
+      claimAuctionFiller: true,
+      auctionFillerAddress: mockPool.id,
+      pendingClaimId,
+      claimAssets: ['CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75'],
+      filledAuction: {
+        type: AuctionType.Interest,
+        user: fillerPubkey,
+        data: {
+          bid: new Map(),
+          lot: new Map([['CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75', 1n]]),
+          block: 750,
+        },
+        scaleBlock: 1000,
+        filled: true,
+        fillHash: 'fill-hash',
+      },
+    };
+
+    await expect(bidderSubmitter.submit(submission)).resolves.toBe(true);
+
+    expect(mockDb.deletePendingClaimEntry).toHaveBeenCalledWith(pendingClaimId);
+  });
+
   describe('interest auctions', () => {
     const tierToken = 'CDQMIKIHKA5UY3FQJ2UDTLNX3GOPD3GPNZWSPTOBVOHEUMQJQXOPC7Y3';
     const backstop = 'CAHCUKBPTW5DR5RNXOHCTJD5U76A6EEZXYZAQFRQEEQRXQ3CRUZ6Z3MO';
@@ -528,6 +601,60 @@ describe('BidderSubmitter', () => {
       expect(mockDb.setFilledAuctionEntry).toHaveBeenCalled();
       // the lot is sent directly to the filler, so no unwind is required
       expect(bidderSubmitter.addSubmission).not.toHaveBeenCalled();
+    });
+
+    it('persists an atomic lot claim before submitting the fill', async () => {
+      const blnt = 'CDTKPWPLOURQA2SGTKTUQOWRCBZEORB4BWBOMJ3D3ZTQQSGE5F6JBQLV';
+      const xlm = 'CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA';
+      const blntXlm = 'CAUIKL3IYGMERDRUN6YSCLWVAKIFG5Q4YJHUKM4S4NJZQIA3BAS6OJPK';
+      APP_CONFIG.auctionFillerAddress = mockPool.id;
+      APP_CONFIG.auctionFillerBlntAddress = blnt;
+      APP_CONFIG.auctionFillerXlmAddress = xlm;
+      APP_CONFIG.auctionFillerBlntUsdcAddress = tierToken;
+      APP_CONFIG.auctionFillerBlntXlmAddress = blntXlm;
+      APP_CONFIG.slippage = 0.01;
+      mockedSorobanHelper.simContractCall.mockResolvedValue(
+        nativeToScVal(fillerPubkey, { type: 'address' })
+      );
+      mockedSorobanHelper.loadCometTokens
+        .mockResolvedValueOnce([blnt, APP_CONFIG.usdcAddress])
+        .mockResolvedValueOnce([blnt, xlm]);
+      mockedSorobanHelper.simCometDepositTokenIn.mockResolvedValue(50_000_000n);
+      mockedSorobanHelper.submitTransaction.mockResolvedValue({
+        ledger: 1002,
+        txHash: 'atomic-fill-hash',
+        latestLedgerCloseTime: Date.now(),
+      } as any);
+
+      await expect(bidderSubmitter.submit(submission)).resolves.toBe(true);
+
+      const pendingClaimId = `${mockPool.id}:${backstop}:${AuctionType.Interest}:750`;
+      const setPendingClaim = mockDb.setPendingClaimEntry as jest.Mock;
+      const setFilledAuction = mockDb.setFilledAuctionEntry as jest.Mock;
+      expect(setPendingClaim).toHaveBeenCalledWith({
+        id: pendingClaimId,
+        filler_address: mockPool.id,
+        pool_id: mockPool.id,
+        auction_type: AuctionType.Interest,
+        assets: [APP_CONFIG.usdcAddress],
+      });
+      expect(setPendingClaim.mock.invocationCallOrder[0]).toBeLessThan(
+        mockedSorobanHelper.submitTransaction.mock.invocationCallOrder[0]
+      );
+      const recordedFill = setFilledAuction.mock.calls[0][0];
+      expect(recordedFill.bid_total).toBeCloseTo(59.2);
+      expect(recordedFill.lot_total).toBeCloseTo(70);
+      expect(recordedFill.est_profit).toBeCloseTo(10.8);
+      expect(recordedFill.fill_block).toBe(1002);
+      expect(bidderSubmitter.addSubmission).toHaveBeenCalledWith(
+        expect.objectContaining({
+          claimAuctionFiller: true,
+          auctionFillerAddress: mockPool.id,
+          pendingClaimId,
+          claimAssets: [APP_CONFIG.usdcAddress],
+        }),
+        2
+      );
     });
 
     it('does not fill if preparing the bid fails', async () => {

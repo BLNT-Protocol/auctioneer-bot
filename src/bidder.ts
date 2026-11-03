@@ -15,11 +15,13 @@ export interface OngoingAuction {
 async function main() {
   const db = AuctioneerDatabase.connect();
   const submissionQueue = new BidderSubmitter(db);
+  submissionQueue.recoverPendingClaims();
 
   process.on('message', async (message: any) => {
     let appEvent = readEvent(message);
     if (appEvent) {
       try {
+        submissionQueue.recoverPendingClaims();
         const timer = Date.now();
         logger.info(`Processing: ${message?.data}`);
         const sorobanHelper = new SorobanHelper();

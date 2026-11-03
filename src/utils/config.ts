@@ -103,7 +103,7 @@ export function validateAppConfig(config: any): boolean {
   ];
   const hasAuctionFillerConfig = auctionFillerFields.some((value) => value !== undefined);
   const hasCompleteAuctionFillerConfig = auctionFillerFields.every(
-    (value) => typeof value === 'string'
+    (value) => typeof value === 'string' && value.trim().length > 0
   );
 
   if (

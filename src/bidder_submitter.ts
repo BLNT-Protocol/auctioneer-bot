@@ -4,7 +4,7 @@ import { calculateAuctionFill } from './auction.js';
 import { prepareInterestBid } from './bid_token.js';
 import { getFillerAvailableBalances, managePositions } from './filler.js';
 import { APP_CONFIG } from './utils/config.js';
-import { AuctioneerDatabase, AuctionEntry, AuctionType } from './utils/db.js';
+import { AuctioneerDatabase, AuctionEntry, AuctionType, PendingClaimEntry } from './utils/db.js';
 import { auctionTypeName, PROTOCOL_FEE_AUCTION_TYPE } from './utils/auction_type.js';
 import { serializeError, stringify } from './utils/json.js';
 import { setInterestAuctionDonateAuth } from './utils/ledger_auth.js';
@@ -44,6 +44,35 @@ export interface FillerUnwind extends BaseBidderSubmission {
   poolId: string;
   filledAuction: ScaledAuction;
   claimAuctionFiller?: boolean;
+  auctionFillerAddress?: string;
+  pendingClaimId?: string;
+  claimAssets?: string[];
+}
+
+function auctionValueModifier(startLedger: number, ledger: number, side: 'bid' | 'lot'): number {
+  const delta = Math.max(0, ledger - startLedger);
+  if (side === 'lot') {
+    return Math.min(delta, 200) / 200;
+  }
+  if (delta <= 200) {
+    return 1;
+  }
+  return Math.max(0, 400 - delta) / 200;
+}
+
+function valueAtExecutionLedger(
+  plannedValue: number,
+  startLedger: number,
+  plannedLedger: number,
+  executionLedger: number,
+  side: 'bid' | 'lot'
+): number {
+  const plannedModifier = auctionValueModifier(startLedger, plannedLedger, side);
+  const executionModifier = auctionValueModifier(startLedger, executionLedger, side);
+  if (plannedModifier === 0) {
+    return 0;
+  }
+  return (plannedValue * executionModifier) / plannedModifier;
 }
 
 export class BidderSubmitter extends SubmissionQueue<BidderSubmission> {
@@ -69,6 +98,49 @@ export class BidderSubmitter extends SubmissionQueue<BidderSubmission> {
       }
       return false;
     });
+  }
+
+  private containsPendingClaim(id: string): boolean {
+    return this.submissions.some(
+      ({ submission }) =>
+        submission.type === BidderSubmissionType.UNWIND && submission.pendingClaimId === id
+    );
+  }
+
+  private queuePendingClaim(claim: PendingClaimEntry): void {
+    if (this.containsPendingClaim(claim.id)) {
+      return;
+    }
+    this.addSubmission(
+      {
+        type: BidderSubmissionType.UNWIND,
+        poolId: claim.pool_id,
+        claimAuctionFiller: true,
+        auctionFillerAddress: claim.filler_address,
+        pendingClaimId: claim.id,
+        claimAssets: claim.assets,
+        filledAuction: {
+          type: claim.auction_type,
+          user: APP_CONFIG.fillerKeypair.publicKey(),
+          data: {
+            bid: new Map(),
+            lot: new Map(claim.assets.map((asset) => [asset, 0n])),
+            block: 0,
+          },
+          scaleBlock: 0,
+          filled: true,
+          fillHash: undefined,
+        } as ScaledAuction,
+      },
+      2
+    );
+  }
+
+  /** Reload durable helper claims after startup or a prior retry cycle. */
+  recoverPendingClaims(): void {
+    for (const claim of this.db.getAllPendingClaimEntries()) {
+      this.queuePendingClaim(claim);
+    }
   }
 
   // @dev: Return true to acknowledge the submission, or false to retry
@@ -149,6 +221,7 @@ export class BidderSubmitter extends SubmissionQueue<BidderSubmission> {
           );
         }
         let operation: string;
+        let pendingClaim: PendingClaimEntry | undefined;
         if (usesAuctionFiller) {
           const config = await loadAndValidateAuctionFiller(sorobanHelper);
           const [plannedAuction] = auction.scale(nextLedger, fill.percent);
@@ -159,6 +232,13 @@ export class BidderSubmitter extends SubmissionQueue<BidderSubmission> {
           const plan = await planAtomicBid(bidToken, bidAmount, config, sorobanHelper);
           assertAtomicBidPlanWithinApprovedCost(plan, fill.bidValue);
           const filler = new AuctionFillerContract(APP_CONFIG.auctionFillerAddress!);
+          pendingClaim = {
+            id: `${auctionBid.auctionEntry.pool_id}:${auctionBid.auctionEntry.user_id}:${auctionBid.auctionEntry.auction_type}:${auction.data.block}`,
+            filler_address: APP_CONFIG.auctionFillerAddress!,
+            pool_id: auctionBid.auctionEntry.pool_id,
+            auction_type: Number(auctionBid.auctionEntry.auction_type),
+            assets: Array.from(plannedAuction.data.lot.keys()),
+          };
           operation =
             auctionBid.auctionEntry.auction_type === AuctionType.Interest
               ? filler.fillInterest(
@@ -185,6 +265,10 @@ export class BidderSubmitter extends SubmissionQueue<BidderSubmission> {
             requests: fill.requests,
           });
         }
+        // Persist before submission so an ambiguous success or process exit is recoverable.
+        if (pendingClaim !== undefined) {
+          this.db.setPendingClaimEntry(pendingClaim);
+        }
         const result = await sorobanHelper.submitTransaction(
           operation,
           APP_CONFIG.fillerKeypair,
@@ -206,6 +290,20 @@ export class BidderSubmitter extends SubmissionQueue<BidderSubmission> {
             : undefined
         );
         const [scaledAuction] = auction.scale(result.ledger, fill.percent);
+        const bidTotal = valueAtExecutionLedger(
+          fill.bidValue,
+          auction.data.block,
+          fill.block,
+          result.ledger,
+          'bid'
+        );
+        const lotTotal = valueAtExecutionLedger(
+          fill.lotValue,
+          auction.data.block,
+          fill.block,
+          result.ledger,
+          'lot'
+        );
         this.db.setFilledAuctionEntry({
           tx_hash: result.txHash,
           pool_id: auctionBid.auctionEntry.pool_id,
@@ -213,21 +311,22 @@ export class BidderSubmitter extends SubmissionQueue<BidderSubmission> {
           user_id: auctionBid.auctionEntry.user_id,
           auction_type: auctionBid.auctionEntry.auction_type,
           bid: scaledAuction.data.bid,
-          bid_total: fill.bidValue,
+          bid_total: bidTotal,
           lot: scaledAuction.data.lot,
-          lot_total: fill.lotValue,
-          est_profit: fill.lotValue - fill.bidValue,
+          lot_total: lotTotal,
+          est_profit: lotTotal - bidTotal,
           fill_block: result.ledger,
           timestamp: result.latestLedgerCloseTime,
         });
         // Atomic helper fills retain their lot in the helper until the owner claims it.
-        if (usesAuctionFiller || auctionBid.auctionEntry.auction_type !== AuctionType.Interest) {
+        if (pendingClaim !== undefined) {
+          this.queuePendingClaim(pendingClaim);
+        } else if (auctionBid.auctionEntry.auction_type !== AuctionType.Interest) {
           this.addSubmission(
             {
               type: BidderSubmissionType.UNWIND,
               poolId: auctionBid.auctionEntry.pool_id,
               filledAuction: scaledAuction,
-              ...(usesAuctionFiller ? { claimAuctionFiller: true } : {}),
             },
             2
           );
@@ -283,11 +382,14 @@ export class BidderSubmitter extends SubmissionQueue<BidderSubmission> {
     switch (Number(fillerUnwind.filledAuction.type)) {
       case AuctionType.Interest:
       case PROTOCOL_FEE_AUCTION_TYPE: {
-        if (!fillerUnwind.claimAuctionFiller || !APP_CONFIG.auctionFillerAddress) {
+        const auctionFillerAddress =
+          fillerUnwind.auctionFillerAddress ?? APP_CONFIG.auctionFillerAddress;
+        if (!fillerUnwind.claimAuctionFiller || !auctionFillerAddress) {
           return true;
         }
-        const lotTokens = Array.from(fillerUnwind.filledAuction.data.lot.keys());
-        const operation = new AuctionFillerContract(APP_CONFIG.auctionFillerAddress).claim(
+        const lotTokens =
+          fillerUnwind.claimAssets ?? Array.from(fillerUnwind.filledAuction.data.lot.keys());
+        const operation = new AuctionFillerContract(auctionFillerAddress).claim(
           APP_CONFIG.fillerKeypair.publicKey(),
           lotTokens
         );
@@ -295,6 +397,9 @@ export class BidderSubmitter extends SubmissionQueue<BidderSubmission> {
         logger.info(
           `Claimed atomic auction lot for pool ${fillerUnwind.poolId}. Hash: ${result.txHash}`
         );
+        if (fillerUnwind.pendingClaimId !== undefined) {
+          this.db.deletePendingClaimEntry(fillerUnwind.pendingClaimId);
+        }
         break;
       }
       case AuctionType.Liquidation:

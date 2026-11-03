@@ -83,6 +83,15 @@ export interface FilledAuctionEntry {
   timestamp: number;
 }
 
+export interface PendingClaimEntry {
+  // Stable identity for one pool auction. This is written before fill submission.
+  id: string;
+  filler_address: string;
+  pool_id: string;
+  auction_type: number;
+  assets: string[];
+}
+
 export class AuctioneerDatabase {
   db: Database.Database;
 
@@ -494,6 +503,58 @@ export class AuctioneerDatabase {
         );
     } catch (error: any) {
       logger.error(`Error setting filled auction entry: ${error}`);
+      throw error;
+    }
+  }
+
+  //********** Pending Atomic Claim Table **********//
+
+  setPendingClaimEntry(entry: PendingClaimEntry): RunResult {
+    try {
+      return this.db
+        .prepare(
+          'INSERT OR REPLACE INTO pending_claims (id, filler_address, pool_id, auction_type, assets) VALUES (?, ?, ?, ?, ?)'
+        )
+        .run(
+          entry.id,
+          entry.filler_address,
+          entry.pool_id,
+          entry.auction_type,
+          stringify(entry.assets)
+        );
+    } catch (error: any) {
+      logger.error(`Error setting pending claim entry: ${error}`);
+      throw error;
+    }
+  }
+
+  deletePendingClaimEntry(id: string): RunResult {
+    try {
+      return this.db.prepare('DELETE FROM pending_claims WHERE id = ?').run(id);
+    } catch (error: any) {
+      logger.error(`Error deleting pending claim entry: ${error}`);
+      throw error;
+    }
+  }
+
+  getAllPendingClaimEntries(): PendingClaimEntry[] {
+    try {
+      const entries = this.db.prepare('SELECT * FROM pending_claims').all() as Array<{
+        id: string;
+        filler_address: string;
+        pool_id: string;
+        auction_type: number;
+        assets: string;
+      }>;
+      return entries.map((entry) => ({
+        id: entry.id,
+        filler_address: entry.filler_address,
+        pool_id: entry.pool_id,
+        auction_type: entry.auction_type,
+        assets: parse<string[]>(entry.assets),
+      }));
+    } catch (error: any) {
+      logger.error(`Error getting pending claim entries: ${error}`);
       throw error;
     }
   }
