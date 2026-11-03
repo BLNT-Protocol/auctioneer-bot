@@ -1,4 +1,4 @@
-FROM node:20-alpine
+FROM node:22-alpine
 
 RUN apk add --no-cache sqlite bash
 
@@ -9,7 +9,7 @@ COPY ./lib/ ./lib/
 COPY ./start.sh ./
 COPY ./db ./db
 
-RUN npm install
+RUN npm ci --omit=dev
 
 RUN chmod +x start.sh
 RUN chmod +x ./db/setup_db.sh

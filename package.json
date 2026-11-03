@@ -13,7 +13,7 @@
   "license": "MIT",
   "description": "A bot that creates and bids on auctions for BLNT v3 pools",
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "devDependencies": {
     "@types/amqplib": "^0.10.5",
