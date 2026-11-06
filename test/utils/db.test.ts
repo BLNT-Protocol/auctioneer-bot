@@ -4,6 +4,7 @@ import {
   UserEntry,
   AuctionEntry,
   FilledAuctionEntry,
+  PendingClaimEntry,
   AuctionType,
   StatusEntry,
   PriceEntry,
@@ -308,6 +309,22 @@ describe('AuctioneerDatabase', () => {
       fill_block: result.fill_block,
       timestamp: result.timestamp,
     }).toEqual(entry);
+  });
+
+  test('should persist and delete pending atomic auction claims', () => {
+    const entry: PendingClaimEntry = {
+      id: 'pool1:2:123',
+      filler_address: 'filler1',
+      pool_id: 'pool1',
+      auction_type: AuctionType.Interest,
+      assets: ['asset1', 'asset2'],
+    };
+
+    db.setPendingClaimEntry(entry);
+    expect(db.getAllPendingClaimEntries()).toEqual([entry]);
+
+    db.deletePendingClaimEntry(entry.id);
+    expect(db.getAllPendingClaimEntries()).toEqual([]);
   });
 
   test('getAllAuctionEntries should return all auction entries', () => {

@@ -3,6 +3,7 @@ import { AuctionBid, BidderSubmissionType, BidderSubmitter } from './bidder_subm
 import { AppEvent, EventType } from './events.js';
 import { APP_CONFIG } from './utils/config.js';
 import { AuctioneerDatabase, AuctionType } from './utils/db.js';
+import { auctionTypeName } from './utils/auction_type.js';
 import { stringify } from './utils/json.js';
 import { logger } from './utils/logger.js';
 import { getNotificationLevelForAuction, sendNotification } from './utils/notifier.js';
@@ -84,7 +85,7 @@ export class BidderHandler {
                 const logMessage =
                   `Auction Calculation\n` +
                   `Filler: ${APP_CONFIG.fillerKeypair.publicKey()}\n` +
-                  `Type: ${AuctionType[auction.type]}\n` +
+                  `Type: ${auctionTypeName(auction.type)}\n` +
                   `Pool: ${auctionEntry.pool_id}\n` +
                   `User: ${auction.user}\n` +
                   `Fill: ${stringify(fill, 2)}\n` +

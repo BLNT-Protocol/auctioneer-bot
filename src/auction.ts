@@ -14,6 +14,11 @@ import { AuctioneerDatabase } from './utils/db.js';
 import { stringify } from './utils/json.js';
 import { logger } from './utils/logger.js';
 import { SorobanHelper } from './utils/soroban_helper.js';
+import { loadAndValidateAuctionFiller, planAtomicBid } from './utils/auction_filler.js';
+import { PROTOCOL_FEE_AUCTION_TYPE } from './utils/auction_type.js';
+
+const PROTOCOL_FEE_AUCTION = PROTOCOL_FEE_AUCTION_TYPE as AuctionType;
+const FILL_PROTOCOL_FEE_AUCTION = 10 as RequestType;
 
 export interface AuctionFill {
   // The block number to fill the auction at
@@ -93,6 +98,7 @@ export async function calculateBlockFillAndPercent(
       relevant_assets.push(poolConfig.primaryAsset);
       break;
     case AuctionType.Interest:
+    case PROTOCOL_FEE_AUCTION:
       relevant_assets.push(APP_CONFIG.usdcAddress);
       break;
     case AuctionType.BadDebt:
@@ -135,7 +141,7 @@ export async function calculateBlockFillAndPercent(
   const [scaledAuction] = auction.scale(auction.data.block + fillBlockDelay, 100);
 
   // filler waits until they can fully fill the interest auction
-  if (auction.type === AuctionType.Interest) {
+  if (auction.type === AuctionType.Interest || auction.type === PROTOCOL_FEE_AUCTION) {
     const usdcBalance = FixedMath.toFloat(fillerBalances.get(APP_CONFIG.usdcAddress) ?? 0n, 7);
     const usdcMaxIn = auctionValue.bidValue * bidScalar * 1.01; // allow for 1% slippage from mint price
     if (usdcMaxIn > usdcBalance) {
@@ -320,6 +326,9 @@ export async function calculateBlockFillAndPercent(
     case AuctionType.BadDebt:
       requestType = RequestType.FillBadDebtAuction;
       break;
+    case PROTOCOL_FEE_AUCTION:
+      requestType = FILL_PROTOCOL_FEE_AUCTION;
+      break;
   }
   // push the fill request on the front of the list
   requests.unshift({
@@ -362,7 +371,11 @@ export async function calculateAuctionValue(
   let bidValue = 0;
   const reserves = pool.reserves;
   for (const [assetId, amount] of auction.data.lot) {
-    if (auction.type === AuctionType.Liquidation || auction.type === AuctionType.Interest) {
+    if (
+      auction.type === AuctionType.Liquidation ||
+      auction.type === AuctionType.Interest ||
+      auction.type === PROTOCOL_FEE_AUCTION
+    ) {
       const reserve = reserves.get(assetId);
       if (reserve === undefined) {
         throw new Error(`Unexpected auction. Lot contains asset that is not a reserve: ${assetId}`);
@@ -401,8 +414,18 @@ export async function calculateAuctionValue(
       effectiveLiabilities += reserve.toEffectiveAssetFromDTokenFloat(amount) * oraclePrice;
       bidValue += reserve.toAssetFromDTokenFloat(amount) * (dbPrice ?? oraclePrice);
     } else if (auction.type === AuctionType.Interest) {
-      // interest auction bids are the selected backstop tier's token, valued as the USDC needed to acquire it
-      bidValue += await valueTierTokenBid(assetId, amount, poolOracle, db, sorobanHelper);
+      // When configured, value the same atomic canonical-Comet route used for execution.
+      if (APP_CONFIG.auctionFillerAddress) {
+        const config = await loadAndValidateAuctionFiller(sorobanHelper);
+        const plan = await planAtomicBid(assetId, amount, config, sorobanHelper);
+        bidValue += FixedMath.toFloat(plan.maxUsdcIn, 7);
+      } else {
+        bidValue += await valueTierTokenBid(assetId, amount, poolOracle, db, sorobanHelper);
+      }
+    } else if (auction.type === PROTOCOL_FEE_AUCTION) {
+      const config = await loadAndValidateAuctionFiller(sorobanHelper);
+      const plan = await planAtomicBid(assetId, amount, config, sorobanHelper);
+      bidValue += FixedMath.toFloat(plan.maxUsdcIn, 7);
     } else {
       throw new Error(`Failed to value bid asset: ${assetId}`);
     }

@@ -61,3 +61,13 @@ CREATE TABLE IF NOT EXISTS filled_auctions (
 );
 CREATE INDEX IF NOT EXISTS idx_filler ON filled_auctions(filler);
 
+-- Atomic auction lots remain in the helper until an owner-authorized claim succeeds.
+-- Recording the claim before submission makes ambiguous fills and restarts recoverable.
+CREATE TABLE IF NOT EXISTS pending_claims (
+    id TEXT PRIMARY KEY,
+    filler_address TEXT NOT NULL,
+    pool_id TEXT NOT NULL,
+    auction_type INTEGER NOT NULL,
+    assets JSON NOT NULL
+);
+
